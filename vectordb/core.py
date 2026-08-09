@@ -167,12 +167,14 @@ class VectorDB:
             # row — matters a lot once you're adding thousands at a time.
             if new_vecs:
                 self.index.add_items(np.stack(new_vecs), np.array(new_labels))
-                for (id_, meta), label in zip(new_ids, new_labels):
-                    self.store.upsert(label, id_, meta or {})
+                self.store.upsert_many(
+                    [(lb, id_, meta) for (id_, meta), lb in zip(new_ids, new_labels)]
+                )
             if update_vecs:
                 self.index.add_items(np.stack(update_vecs), np.array(update_labels))
-                for (id_, meta), label in zip(update_ids, update_labels):
-                    self.store.upsert(label, id_, meta or {})
+                self.store.upsert_many(
+                    [(lb, id_, meta) for (id_, meta), lb in zip(update_ids, update_labels)]
+                )
 
     def _require_embedder(self):
         if self.embedder is None:
@@ -208,14 +210,14 @@ class VectorDB:
         return self.search(vector, k=k, filter=filter, ef=ef)
 
     def delete(self, ids: Union[str, Sequence[str]]):
-        """Soft-delete by ID. Space is reclaimed on compact()."""
+        """Soft-delete by ID (batched — one commit for the whole call).
+        Space is reclaimed on compact()."""
         if isinstance(ids, str):
             ids = [ids]
         with self._lock:
-            for id_ in ids:
-                label = self.store.mark_deleted(id_)
-                if label is not None:
-                    self.index.mark_deleted(label)
+            labels = self.store.mark_deleted_many(ids)
+            for label in labels:
+                self.index.mark_deleted(label)
 
     def update_metadata(self, id_: str, metadata: Dict[str, Any]):
         """Replace metadata for an existing record without touching its vector."""
@@ -246,6 +248,10 @@ class VectorDB:
                 selective filters may require raising k or ef.
         """
         query_vector = np.asarray(query_vector, dtype=np.float32).reshape(1, -1)
+        if query_vector.shape[1] != self.dim:
+            raise ValueError(
+                f"Query vector dim {query_vector.shape[1]} != DB dim {self.dim}"
+            )
         filter_fn = self._compile_filter(filter)
 
         with self._lock:

@@ -24,10 +24,24 @@ class MetadataStore:
         if not hasattr(self._local, "conn"):
             self._local.conn = sqlite3.connect(self.path)
             self._local.conn.execute("PRAGMA journal_mode=WAL;")
+            self._local.conn.execute("PRAGMA synchronous=NORMAL;")
         return self._local.conn
+
+    def close(self):
+        """Close this thread's connection, if one was opened. Call this when
+        a worker thread is being retired (e.g. in a threaded server) to
+        avoid leaking connections over the life of a long-running process."""
+        if hasattr(self._local, "conn"):
+            self._local.conn.close()
+            del self._local.conn
 
     def _init_schema(self):
         conn = sqlite3.connect(self.path)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        # NORMAL is safe with WAL (durable across app crashes, only risks
+        # loss on an OS crash/power loss) and is dramatically faster than
+        # the default FULL for batches of small writes.
+        conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS records (
@@ -69,14 +83,22 @@ class MetadataStore:
     # -- CRUD ---------------------------------------------------------------
 
     def upsert(self, label: int, id_: str, metadata: Dict[str, Any]):
-        self.conn.execute(
+        self.upsert_many([(label, id_, metadata)])
+
+    def upsert_many(self, records: List[Tuple[int, str, Dict[str, Any]]]):
+        """Batch upsert with a single commit — much faster than calling
+        upsert() in a loop, which commits (and can fsync) per row."""
+        if not records:
+            return
+        rows = [(label, id_, json.dumps(meta)) for label, id_, meta in records]
+        self.conn.executemany(
             """
             INSERT INTO records (label, id, metadata, deleted)
             VALUES (?, ?, ?, 0)
             ON CONFLICT(label) DO UPDATE SET
                 id=excluded.id, metadata=excluded.metadata, deleted=0
             """,
-            (label, id_, json.dumps(metadata)),
+            rows,
         )
         self.conn.commit()
 
@@ -112,14 +134,28 @@ class MetadataStore:
         return {r[0]: (r[1], json.loads(r[2])) for r in cur.fetchall()}
 
     def mark_deleted(self, id_: str) -> Optional[int]:
-        label = self.get_label(id_)
-        if label is None:
-            return None
-        self.conn.execute(
-            "UPDATE records SET deleted = 1 WHERE label = ?", (label,)
+        labels = self.mark_deleted_many([id_])
+        return labels[0] if labels else None
+
+    def mark_deleted_many(self, ids: List[str]) -> List[int]:
+        """Batch soft-delete with a single commit. Returns the labels that
+        were actually found and marked (skips unknown/already-deleted ids)."""
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        cur = self.conn.execute(
+            f"SELECT label FROM records WHERE id IN ({placeholders}) AND deleted = 0",
+            ids,
         )
-        self.conn.commit()
-        return label
+        labels = [r[0] for r in cur.fetchall()]
+        if labels:
+            label_placeholders = ",".join("?" for _ in labels)
+            self.conn.execute(
+                f"UPDATE records SET deleted = 1 WHERE label IN ({label_placeholders})",
+                labels,
+            )
+            self.conn.commit()
+        return labels
 
     def count(self) -> int:
         cur = self.conn.execute("SELECT COUNT(*) FROM records WHERE deleted = 0")
