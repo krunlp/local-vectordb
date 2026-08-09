@@ -118,18 +118,29 @@ class VectorDB:
         ids: Union[str, Sequence[str]],
         vectors: Union[np.ndarray, Sequence[Sequence[float]]],
         metadatas: Optional[Union[Dict[str, Any], Sequence[Dict[str, Any]]]] = None,
+        texts: Optional[Union[str, Sequence[Optional[str]]]] = None,
     ):
-        """Insert or overwrite vectors by ID (upsert semantics)."""
+        """Insert or overwrite vectors by ID (upsert semantics).
+
+        texts: optional raw text per record, indexed for keyword (BM25)
+               search via SQLite FTS5. Only needed if you plan to use
+               hybrid_search(). Not required for plain vector search.
+        """
         single = isinstance(ids, str)
         if single:
             ids = [ids]
             vectors = [vectors]
             metadatas = [metadatas or {}]
+            texts = [texts] if texts is not None else [None]
         else:
             ids = list(ids)
             vectors = np.asarray(vectors, dtype=np.float32)
             if metadatas is None:
                 metadatas = [{} for _ in ids]
+            if texts is None:
+                texts = [None for _ in ids]
+            else:
+                texts = list(texts)
 
         vectors = np.asarray(vectors, dtype=np.float32)
         if vectors.ndim == 1:
@@ -144,14 +155,15 @@ class VectorDB:
             # Dedup within this call (last occurrence wins) — otherwise two
             # rows with the same new id would each grab a fresh label before
             # either is committed, violating the store's unique id constraint.
-            dedup: Dict[str, Tuple[np.ndarray, Dict[str, Any]]] = {}
-            for id_, vec, meta in zip(ids, vectors, metadatas):
-                dedup[id_] = (vec, meta)
+            dedup: Dict[str, Tuple[np.ndarray, Dict[str, Any], Optional[str]]] = {}
+            for id_, vec, meta, text in zip(ids, vectors, metadatas, texts):
+                dedup[id_] = (vec, meta, text)
 
             new_ids, new_vecs, new_labels = [], [], []
             update_ids, update_vecs, update_labels = [], [], []
+            fts_records: List[Tuple[str, str]] = []
             next_label = self.store.next_label()  # only hits the DB once per add() call
-            for id_, (vec, meta) in dedup.items():
+            for id_, (vec, meta, text) in dedup.items():
                 existing_label = self.store.get_label(id_)
                 if existing_label is not None:
                     update_ids.append((id_, meta))
@@ -162,6 +174,9 @@ class VectorDB:
                     new_vecs.append(vec)
                     new_labels.append(next_label)
                     next_label += 1  # allocate sequentially within this batch
+                if text:
+                    fts_records.append((id_, text))
+
 
             # One vectorized call per group instead of one Python call per
             # row — matters a lot once you're adding thousands at a time.
@@ -175,6 +190,8 @@ class VectorDB:
                 self.store.upsert_many(
                     [(lb, id_, meta) for (id_, meta), lb in zip(update_ids, update_labels)]
                 )
+            if fts_records:
+                self.store.upsert_fts_many(fts_records)
 
     def _require_embedder(self):
         if self.embedder is None:
@@ -190,12 +207,16 @@ class VectorDB:
         texts: Union[str, Sequence[str]],
         metadatas: Optional[Union[Dict[str, Any], Sequence[Dict[str, Any]]]] = None,
     ):
-        """Like add(), but embeds raw text via the configured embedder."""
+        """Like add(), but embeds raw text via the configured embedder AND
+        indexes the text for keyword search, enabling hybrid_search()."""
         self._require_embedder()
         single = isinstance(texts, str)
         text_list = [texts] if single else list(texts)
         vectors = self.embedder.encode(text_list)
-        self.add(ids, vectors, metadatas)
+        if single:
+            self.add(ids, vectors[0], metadatas, texts=text_list[0])
+        else:
+            self.add(ids, vectors, metadatas, texts=text_list)
 
     def search_text(
         self,
@@ -209,6 +230,83 @@ class VectorDB:
         vector = self.embedder.encode([query_text])[0]
         return self.search(vector, k=k, filter=filter, ef=ef)
 
+    def hybrid_search(
+        self,
+        query_text: str,
+        k: int = 10,
+        filter: Optional[Union[FilterFn, Dict[str, Any]]] = None,
+        rrf_k: int = 60,
+        candidate_pool: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """
+        Semantic (vector) search + keyword (BM25/FTS5) search, fused with
+        Reciprocal Rank Fusion (RRF). Catches both "meaning" matches (vector
+        search) and exact-term matches like names, codes, or acronyms that
+        embeddings can under-rank (keyword search).
+
+        Requires records to have been added with add_text(), or add() with
+        the `texts=` argument — only records with indexed text participate
+        in the keyword side (records without indexed text can still surface
+        via the vector side).
+
+        RRF score per item = sum over each ranked list it appears in of
+        1 / (rrf_k + rank). rrf_k=60 is the standard default from the
+        original RRF paper; larger values flatten the influence of rank
+        differences, smaller values weight top ranks more heavily.
+
+        candidate_pool: how many results to pull from each individual
+        search before fusing — larger surfaces more overlap candidates but
+        costs more per query.
+        """
+        self._require_embedder()
+        pool = max(k, candidate_pool)
+
+        query_vector = self.embedder.encode([query_text])[0]
+        vector_results = self.search(query_vector, k=pool, filter=filter)
+
+        filter_fn = self._compile_filter(filter)
+        with self._lock:
+            fts_hits = self.store.search_fts(query_text, limit=pool)
+
+        # Apply the same metadata filter to keyword hits, and fetch their
+        # metadata (vector_results already carry metadata; fts hits don't).
+        fts_filtered: List[Tuple[str, Dict[str, Any]]] = []
+        if fts_hits:
+            fts_ids = [id_ for id_, _ in fts_hits]
+            meta_by_id = {}
+            for id_ in fts_ids:
+                label = self.store.get_label(id_)
+                if label is None:
+                    continue
+                rec = self.store.get_by_label(label)
+                if rec is None:
+                    continue
+                _, meta = rec
+                meta_by_id[id_] = meta
+            for id_, _bm25 in fts_hits:
+                meta = meta_by_id.get(id_)
+                if meta is None:  # deleted since indexed, or filtered out below
+                    continue
+                if filter_fn is not None and not filter_fn(meta):
+                    continue
+                fts_filtered.append((id_, meta))
+
+        # -- Reciprocal Rank Fusion --------------------------------------
+        rrf_scores: Dict[str, float] = {}
+        metadata_by_id: Dict[str, Dict[str, Any]] = {}
+        for rank, r in enumerate(vector_results):
+            rrf_scores[r["id"]] = rrf_scores.get(r["id"], 0.0) + 1.0 / (rrf_k + rank + 1)
+            metadata_by_id[r["id"]] = r["metadata"]
+        for rank, (id_, meta) in enumerate(fts_filtered):
+            rrf_scores[id_] = rrf_scores.get(id_, 0.0) + 1.0 / (rrf_k + rank + 1)
+            metadata_by_id.setdefault(id_, meta)
+
+        ranked = sorted(rrf_scores.items(), key=lambda kv: kv[1], reverse=True)[:k]
+        return [
+            {"id": id_, "score": score, "metadata": metadata_by_id[id_]}
+            for id_, score in ranked
+        ]
+
     def delete(self, ids: Union[str, Sequence[str]]):
         """Soft-delete by ID (batched — one commit for the whole call).
         Space is reclaimed on compact()."""
@@ -218,6 +316,7 @@ class VectorDB:
             labels = self.store.mark_deleted_many(ids)
             for label in labels:
                 self.index.mark_deleted(label)
+            self.store.delete_fts_many(ids)
 
     def update_metadata(self, id_: str, metadata: Dict[str, Any]):
         """Replace metadata for an existing record without touching its vector."""

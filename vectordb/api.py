@@ -144,6 +144,16 @@ def search_text(req: SearchTextRequest):
     return {"results": results}
 
 
+@app.post("/hybrid_search")
+def hybrid_search(req: SearchTextRequest):
+    """Semantic + keyword search fused via RRF. See VectorDB.hybrid_search
+    for details. Only records added via /add_text (or add() with texts=)
+    participate in the keyword side."""
+    _require_embedder()
+    results = db.hybrid_search(req.text, k=req.k, filter=req.filter)
+    return {"results": results}
+
+
 # -- record management -----------------------------------------------------
 
 @app.get("/items/{id}")

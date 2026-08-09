@@ -130,6 +130,34 @@ Call `db.save()` after a batch of writes, or after every write if losing
 recent writes on a crash is unacceptable. The `VectorDB.api` HTTP server
 already does this for you on every write endpoint.
 
+## Hybrid search (semantic + keyword)
+
+`hybrid_search()` combines vector similarity with BM25 keyword search
+(via SQLite's FTS5 extension) using Reciprocal Rank Fusion (RRF). This
+catches both "meaning" matches (embeddings) and exact-term matches —
+names, SKUs, error codes, acronyms — that embeddings alone can under-rank.
+
+```python
+db = VectorDB("./mydb", embedder=embedder)
+
+# add_text() indexes for BOTH vector and keyword search
+db.add_text("doc1", "SKU-4471-X is currently out of stock")
+
+results = db.hybrid_search("SKU-4471-X", k=5)
+# -> ranks doc1 highly even if its embedding similarity to the query
+#    alone wouldn't have put it in the top results
+```
+
+Notes:
+- Only records added via `add_text()` (or `add(..., texts=[...])`) have a
+  keyword-searchable side; records added with `add()` and no `texts=` still
+  participate via vector similarity only.
+- `score` in hybrid results is the fused RRF score (higher = better), not a
+  raw distance — don't compare it directly to `search()`'s distance scores.
+- Tune fusion weighting with `rrf_k` (default 60, the standard from the RRF
+  paper) and `candidate_pool` (how many results each individual search
+  contributes before fusion; larger = better recall, more per-query cost).
+
 ## Use cases
 
 **Semantic search / RAG** — embed your documents/chunks, `add()` them with

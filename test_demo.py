@@ -75,4 +75,23 @@ print("Nearest to near-duplicate of doc3:", dup_check)
 assert dup_check[0]["id"] == "doc3"
 assert dup_check[0]["score"] < 0.01  # very close in cosine distance
 
+# 4. Hybrid search (semantic + keyword, via a mock embedder) --------------
+class MockEmbedder:
+    dim = DIM
+    def encode(self, texts):
+        out = []
+        for t in texts:
+            rng = np.random.RandomState(abs(hash(t)) % (2**32))
+            v = rng.randn(self.dim).astype(np.float32)
+            out.append(v / np.linalg.norm(v))
+        return np.array(out, dtype=np.float32)
+
+shutil.rmtree("/tmp/testdb_hybrid", ignore_errors=True)
+db3 = VectorDB("/tmp/testdb_hybrid", embedder=MockEmbedder())
+db3.add_text("h1", "The quick brown fox jumps over the lazy dog")
+db3.add_text("h2", "SKU-4471-X is out of stock until next month")
+hybrid_results = db3.hybrid_search("SKU-4471-X", k=2)
+print("Hybrid search:", [(r["id"], round(r["score"], 4)) for r in hybrid_results])
+assert hybrid_results[0]["id"] == "h2"  # exact keyword match should win
+
 print("\nALL TESTS PASSED")

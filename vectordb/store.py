@@ -7,6 +7,7 @@ HNSW (via hnswlib) only understands integer labels, so this store keeps:
   - a free-list of reusable integer labels (for after deletes)
 """
 import json
+import re
 import sqlite3
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -54,6 +55,13 @@ class MetadataStore:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_records_id ON records(id)"
+        )
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
+                id UNINDEXED, text, tokenize='porter unicode61'
+            )
+            """
         )
         conn.execute(
             """
@@ -164,6 +172,46 @@ class MetadataStore:
     def all_active_labels(self) -> List[int]:
         cur = self.conn.execute("SELECT label FROM records WHERE deleted = 0")
         return [r[0] for r in cur.fetchall()]
+
+    # -- full-text (FTS5) for hybrid search --------------------------------
+
+    def upsert_fts_many(self, records: List[Tuple[str, str]]):
+        """records: list of (id, text). Upsert-by-delete-then-insert since
+        FTS5 virtual tables don't support ON CONFLICT."""
+        if not records:
+            return
+        ids = [r[0] for r in records]
+        placeholders = ",".join("?" for _ in ids)
+        self.conn.execute(f"DELETE FROM fts WHERE id IN ({placeholders})", ids)
+        self.conn.executemany("INSERT INTO fts (id, text) VALUES (?, ?)", records)
+        self.conn.commit()
+
+    def delete_fts_many(self, ids: List[str]):
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        self.conn.execute(f"DELETE FROM fts WHERE id IN ({placeholders})", ids)
+        self.conn.commit()
+
+    def search_fts(self, query_text: str, limit: int) -> List[Tuple[str, float]]:
+        """Keyword search via BM25. Returns [(id, bm25_rank), ...] ordered
+        best-first (BM25's `rank` is more negative = more relevant in FTS5,
+        so ORDER BY rank ascending gives best matches first)."""
+        tokens = re.findall(r"\w+", query_text.lower())
+        if not tokens:
+            return []
+        # Quote each token so FTS5 query-syntax characters in the input
+        # (e.g. '-', '"', ':') can't be misinterpreted as query operators.
+        fts_query = " OR ".join(f'"{t}"' for t in tokens)
+        try:
+            cur = self.conn.execute(
+                "SELECT id, rank FROM fts WHERE fts MATCH ? ORDER BY rank LIMIT ?",
+                (fts_query, limit),
+            )
+            return [(r[0], r[1]) for r in cur.fetchall()]
+        except sqlite3.OperationalError:
+            # Malformed query somehow slipped through quoting — fail soft.
+            return []
 
     # -- misc key/value config store ----------------------------------------
 
