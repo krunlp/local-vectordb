@@ -1,0 +1,9 @@
+hnswlib>=0.8.0
+numpy>=1.24.0
+
+# Optional: HTTP server (vectordb.api)
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
+# Optional: text embedding support (vectordb.embeddings.TextEmbedder)
+fastembed>=0.3.0
