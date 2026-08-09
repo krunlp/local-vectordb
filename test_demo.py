@@ -1,3 +1,4 @@
+import os
 import shutil
 import numpy as np
 from vectordb import VectorDB
@@ -132,5 +133,48 @@ for id_, v in list(resize_vecs.items())[:15]:
     r = db5.search(v, k=1)
     assert r[0]["id"] == id_, f"corruption after resize: {id_} -> {r[0]['id']}"
 print("Resize/capacity-growth: 5 forced resizes, zero corruption")
+
+# 7. OKF (Open Knowledge Format) bundle ingestion -- self-contained synthetic
+#    bundle so this test doesn't depend on cloning an external repo.
+from vectordb.okf import ingest_okf_bundle, load_bundle
+shutil.rmtree("/tmp/testdb_okf_bundle", ignore_errors=True)
+os.makedirs("/tmp/testdb_okf_bundle/tables", exist_ok=True)
+with open("/tmp/testdb_okf_bundle/index.md", "w") as f:
+    f.write("# Bundle\n\n* [users](tables/users.md)\n")  # reserved, must be skipped
+with open("/tmp/testdb_okf_bundle/tables/users.md", "w") as f:
+    f.write(
+        "---\ntype: BigQuery Table\ntitle: Users\ndescription: User accounts\n"
+        "tags: [users, accounts]\n---\n\nContains user account records. "
+        "See [orders](/tables/orders.md) for purchase history.\n"
+    )
+with open("/tmp/testdb_okf_bundle/tables/orders.md", "w") as f:
+    f.write(
+        "---\ntype: BigQuery Table\ntitle: Orders\nstatus: stable\n"
+        "stale_after: 2026-12-31\n---\n\nContains order records.\n"
+    )
+with open("/tmp/testdb_okf_bundle/tables/legacy_orders.md", "w") as f:
+    f.write(
+        "---\ntype: BigQuery Table\ntitle: Legacy Orders\nstatus: deprecated\n---\n\n"
+        "Superseded by orders.md.\n"
+    )
+
+concepts = load_bundle("/tmp/testdb_okf_bundle")
+assert len(concepts) == 3  # index.md correctly excluded
+ids = {c.concept_id for c in concepts}
+assert ids == {"tables/users", "tables/orders", "tables/legacy_orders"}
+
+shutil.rmtree("/tmp/testdb_okf_ingest", ignore_errors=True)
+db6 = VectorDB("/tmp/testdb_okf_ingest", embedder=MockEmbedder())
+result = ingest_okf_bundle(db6, "/tmp/testdb_okf_bundle")
+print("OKF ingest result:", result)
+assert result == {"indexed": 2, "skipped_deprecated": 1, "skipped_malformed": 0}
+assert db6.get("tables/legacy_orders") is None  # deprecated, correctly skipped
+orders = db6.get("tables/orders")
+assert orders["metadata"]["stale_after"] == "2026-12-31"  # date -> string, JSON-safe
+users = db6.get("tables/users")
+assert "/tables/orders.md" in users["metadata"]["links"]  # cross-link extracted
+r = db6.hybrid_search("user accounts", k=2)
+assert "tables/users" in [x["id"] for x in r]
+print("OKF bundle ingestion: parsing, deprecated-skip, cross-links, search all verified")
 
 print("\nALL TESTS PASSED")

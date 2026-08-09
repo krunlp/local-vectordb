@@ -22,6 +22,7 @@ classifiers = [
 dependencies = [
     "hnswlib>=0.8.0",
     "numpy>=1.24.0",
+    "pyyaml>=6.0.0",
 ]
 
 [project.optional-dependencies]

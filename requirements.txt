@@ -1,5 +1,6 @@
 hnswlib>=0.8.0
 numpy>=1.24.0
+pyyaml>=6.0.0  # for OKF bundle ingestion (vectordb.okf)
 
 # Optional: HTTP server (vectordb.api)
 fastapi>=0.110.0

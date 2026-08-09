@@ -225,6 +225,47 @@ insert throughput on your real target machine with your real dimension
 before committing to a 10M-vector plan; don't assume small-scale numbers
 scale up proportionally.
 
+## OKF (Open Knowledge Format) support
+
+[OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog) is Google
+Cloud's open spec for representing knowledge as a directory of markdown
+files with YAML frontmatter. `vectordb.okf` ingests an OKF bundle so you
+can semantically/hybrid-search it, instead of only following its markdown
+cross-links by hand.
+
+```python
+from vectordb import VectorDB
+from vectordb.embeddings import TextEmbedder
+from vectordb.okf import ingest_okf_bundle
+
+db = VectorDB("./mydb", embedder=TextEmbedder())
+result = ingest_okf_bundle(db, "/path/to/okf/bundle")
+print(result)  # {"indexed": 42, "skipped_deprecated": 3, "skipped_malformed": 0}
+
+results = db.hybrid_search("revenue recognition policy", k=5)
+```
+
+Notes, built and tested against Google's real reference bundles
+(`GoogleCloudPlatform/knowledge-catalog`), not just the written spec:
+
+- Concept ID = the file's bundle-relative path with `.md` stripped (per
+  spec — this is how OKF concepts are addressed).
+- `index.md` and `log.md` are reserved filenames (navigation/history), not
+  concepts, and are skipped at every directory level.
+- Only `type` is required in frontmatter; everything else (`title`,
+  `description`, `resource`, `tags`, `status`, `stale_after`, and any
+  producer-defined extras) is optional and tolerated if missing or unknown.
+- Concepts with `status: deprecated` are **skipped by default** — pass
+  `include_deprecated=True` to index them anyway (e.g. for an archival
+  view). Real bundles do use this field, so this matters in practice.
+- Markdown cross-links (`[text](/tables/x.md)` or `[text](./x.md)`) are
+  extracted into `metadata["links"]`, since OKF doesn't have a `links:`
+  frontmatter field — links are just normal markdown.
+- `stale_after` (a YAML date) is normalized to an ISO string, since raw
+  `datetime.date` objects aren't JSON-serializable for the metadata store.
+- Searchable text is `title + description + body`, so semantic search
+  weighs the concept's own summary alongside its full content.
+
 ## Use cases
 
 **Semantic search / RAG** — embed your documents/chunks, `add()` them with

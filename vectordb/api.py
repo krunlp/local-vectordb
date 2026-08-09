@@ -154,6 +154,25 @@ def hybrid_search(req: SearchTextRequest):
     return {"results": results}
 
 
+class IngestOKFRequest(BaseModel):
+    bundle_path: str  # path on the server's filesystem, e.g. a mounted volume
+    include_deprecated: bool = False
+
+
+@app.post("/ingest_okf")
+def ingest_okf(req: IngestOKFRequest):
+    """Ingest an Open Knowledge Format bundle (a directory of markdown
+    files on the server's filesystem) for semantic + hybrid search. See
+    vectordb.okf for details. Requires EMBED_MODEL to be configured."""
+    _require_embedder()
+    from .okf import ingest_okf_bundle
+    if not os.path.isdir(req.bundle_path):
+        raise HTTPException(status_code=400, detail=f"Not a directory: {req.bundle_path}")
+    result = ingest_okf_bundle(db, req.bundle_path, include_deprecated=req.include_deprecated)
+    db.save()
+    return result
+
+
 # -- record management -----------------------------------------------------
 
 @app.get("/items/{id}")
