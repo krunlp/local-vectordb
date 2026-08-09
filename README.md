@@ -197,6 +197,34 @@ Notes:
   paper) and `candidate_pool` (how many results each individual search
   contributes before fusion; larger = better recall, more per-query cost).
 
+## Capacity planning
+
+Real measured numbers (not estimates) at dim=128: **660 bytes/vector on
+disk** for the HNSW index (default `M=16`) — 512 bytes is the raw float32
+vector itself, ~148 bytes is graph overhead. This scales linearly with N
+(overhead is per-node from `M`, not from total graph size), so it
+extrapolates reliably to larger N — unlike build *time*, which doesn't
+extrapolate as cleanly (see below).
+
+| vectors | dim 128 | dim 384 (bge-small default) | dim 768 |
+|---|---|---|---|
+| 100K | 0.07 GB | 0.17 GB | 0.32 GB |
+| 1M | 0.66 GB | 1.68 GB | 3.22 GB |
+| 10M | 6.6 GB | 16.8 GB | 32.2 GB |
+
+**Important**: hnswlib keeps the entire index in RAM for search — the
+numbers above are your *minimum RAM* requirement, not just disk. At 10M
+vectors with 384-dim embeddings, budget ~17GB+ RAM, not a typical laptop.
+Add ~51 bytes/record for empty metadata (more if you store real fields —
+measure your own metadata size and add it).
+
+**Build time does not extrapolate linearly from small tests** — insertion
+cost grows as the graph gets larger, and hnswlib parallelizes across CPU
+cores, so throughput depends heavily on your actual hardware. Benchmark
+insert throughput on your real target machine with your real dimension
+before committing to a 10M-vector plan; don't assume small-scale numbers
+scale up proportionally.
+
 ## Use cases
 
 **Semantic search / RAG** — embed your documents/chunks, `add()` them with

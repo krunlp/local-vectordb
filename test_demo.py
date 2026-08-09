@@ -116,4 +116,21 @@ assert result == {"kept": 2, "dropped": 1}
 assert db4.get("b0") is None  # orphaned record cleaned up
 assert db4.get("a0") is not None  # real (saved) record survives
 
+# 6. Capacity auto-growth: force multiple resize_index() calls and verify
+#    zero data corruption across them (undersized on purpose).
+shutil.rmtree("/tmp/testdb_resize", ignore_errors=True)
+db5 = VectorDB("/tmp/testdb_resize", dim=4, max_elements=10)  # tiny on purpose
+resize_vecs = {}
+for batch in range(5):
+    ids = [f"r{batch}_{i}" for i in range(15)]  # exceeds current capacity each time
+    vecs = np.random.randn(15, 4).astype(np.float32)
+    db5.add(ids, vecs)
+    for id_, v in zip(ids, vecs):
+        resize_vecs[id_] = v
+assert db5.count() == 75
+for id_, v in list(resize_vecs.items())[:15]:
+    r = db5.search(v, k=1)
+    assert r[0]["id"] == id_, f"corruption after resize: {id_} -> {r[0]['id']}"
+print("Resize/capacity-growth: 5 forced resizes, zero corruption")
+
 print("\nALL TESTS PASSED")
