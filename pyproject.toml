@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-vectordb"
+version = "0.1.0"
+description = "A small, local, embedded vector database (HNSW + SQLite), with optional FastAPI HTTP wrapper, text-embedding, and hybrid (semantic + keyword) search."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "krunlp" }]
+keywords = ["vector database", "hnsw", "embeddings", "semantic search", "hybrid search", "rag"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "hnswlib>=0.8.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+# HTTP server (vectordb.api)
+api = ["fastapi>=0.110.0", "uvicorn>=0.29.0"]
+# Text embedding support (vectordb.embeddings.TextEmbedder), enables
+# add_text()/search_text()/hybrid_search()
+embeddings = ["fastembed>=0.3.0"]
+# Everything
+all = ["fastapi>=0.110.0", "uvicorn>=0.29.0", "fastembed>=0.3.0"]
+
+[project.urls]
+Repository = "https://github.com/krunlp/local-vectordb"
+
+[tool.setuptools]
+packages = ["vectordb"]
