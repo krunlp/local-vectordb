@@ -94,4 +94,26 @@ hybrid_results = db3.hybrid_search("SKU-4471-X", k=2)
 print("Hybrid search:", [(r["id"], round(r["score"], 4)) for r in hybrid_results])
 assert hybrid_results[0]["id"] == "h2"  # exact keyword match should win
 
+# 5. Crash recovery: compact() must self-heal an index/metadata mismatch
+#    caused by unsaved writes before a crash, not raise an error.
+import subprocess, sys
+shutil.rmtree("/tmp/testdb_crash", ignore_errors=True)
+crash_script = '''
+import numpy as np
+from vectordb import VectorDB
+db = VectorDB("/tmp/testdb_crash", dim=4, max_elements=100)
+db.add(["a0","a1"], np.random.randn(2,4).astype(np.float32))
+db.save()
+db.add(["b0"], np.random.randn(1,4).astype(np.float32))
+# exits without saving -- simulates a crash
+'''
+subprocess.run([sys.executable, "-c", crash_script], check=True)
+db4 = VectorDB("/tmp/testdb_crash")
+assert db4.get("b0") is not None  # metadata survived (SQLite commits every write)
+result = db4.compact()
+print("compact() after simulated crash:", result)
+assert result == {"kept": 2, "dropped": 1}
+assert db4.get("b0") is None  # orphaned record cleaned up
+assert db4.get("a0") is not None  # real (saved) record survives
+
 print("\nALL TESTS PASSED")

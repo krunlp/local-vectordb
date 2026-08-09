@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-vectordb"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small, local, embedded vector database (HNSW + SQLite), with optional FastAPI HTTP wrapper, text-embedding, and hybrid (semantic + keyword) search."
 readme = "README.md"
 requires-python = ">=3.9"

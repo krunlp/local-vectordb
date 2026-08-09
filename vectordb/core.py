@@ -417,26 +417,54 @@ class VectorDB:
         with self._lock:
             self.index.save_index(self._index_path)
 
-    def compact(self):
+    def compact(self) -> Dict[str, int]:
         """
         Rebuild the index from scratch, dropping soft-deleted vectors.
         Use periodically after many deletes to reclaim memory/disk space.
+
+        Also self-heals a specific inconsistency: if the process previously
+        crashed (or exited) between a write and the next save(), the
+        metadata store can reference labels whose vectors were never
+        persisted to the index file. Those records are detected here and
+        soft-deleted (their vectors are genuinely unrecoverable — this
+        makes state consistent again rather than raising an error).
+
+        Returns {"kept": N, "dropped": N} — "dropped" is normally 0; a
+        nonzero value means unsaved writes were lost to an earlier crash.
         """
         with self._lock:
             active_labels = self.store.all_active_labels()
             if not active_labels:
-                return
-            vectors = np.array(
-                self.index.get_items(active_labels), dtype=np.float32
-            )
+                return {"kept": 0, "dropped": 0}
+
+            index_labels = set(self.index.get_ids_list())
+            present = [lb for lb in active_labels if lb in index_labels]
+            missing = [lb for lb in active_labels if lb not in index_labels]
+
+            if missing:
+                missing_ids = []
+                for lb in missing:
+                    rec = self.store.get_by_label(lb)
+                    if rec is not None:
+                        missing_ids.append(rec[0])
+                if missing_ids:
+                    self.store.mark_deleted_many(missing_ids)
+                    self.store.delete_fts_many(missing_ids)
+
+            if not present:
+                self.save()
+                return {"kept": 0, "dropped": len(missing)}
+
+            vectors = np.array(self.index.get_items(present), dtype=np.float32)
             new_index = hnswlib.Index(space=self.space, dim=self.dim)
             new_index.init_index(
-                max_elements=max(len(active_labels) * 2, 1000)
+                max_elements=max(len(present) * 2, 1000)
             )
-            new_index.add_items(vectors, np.array(active_labels))
+            new_index.add_items(vectors, np.array(present))
             new_index.set_ef(self.index.ef)
             self.index = new_index
             self.save()
+            return {"kept": len(present), "dropped": len(missing)}
 
     def __len__(self):
         return self.count()
