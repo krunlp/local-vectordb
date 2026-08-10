@@ -46,6 +46,27 @@ class ConceptInput:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
+def _safe_concept_id(concept_id: str) -> str:
+    """Reject concept IDs that could escape output_dir when joined into a
+    filesystem path -- absolute paths, '..' components, or empty segments
+    (e.g. from a leading '/' producing a '' split). This matters because
+    concept IDs can come directly from caller-supplied dicts (the
+    documents_to_okf list-of-dicts input path), not just from our own
+    filename-derived slugs, so a caller (or a malicious/buggy upstream
+    document source) could otherwise write files outside output_dir."""
+    normalized = concept_id.replace("\\", "/")
+    if normalized.startswith("/") or normalized.startswith("~"):
+        raise ValueError(
+            f"Unsafe concept id (absolute path not allowed): {concept_id!r}"
+        )
+    parts = normalized.split("/")
+    if any(p in ("..", "") for p in parts):
+        raise ValueError(
+            f"Unsafe concept id (path traversal / empty segment): {concept_id!r}"
+        )
+    return normalized
+
+
 def _slugify(s: str) -> str:
     s = s.strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s)
@@ -169,6 +190,7 @@ def write_bundle(
             description = _derive_description(c.text, strip_first_line=consumed_first_line)
 
         concept_id = c.id or _slugify(title)
+        concept_id = _safe_concept_id(concept_id)
         base_id = concept_id
         n = 2
         while concept_id in used_ids:
@@ -183,6 +205,12 @@ def write_bundle(
         md = render_concept_markdown(resolved, producer=producer)
 
         file_path = os.path.join(output_dir, concept_id + ".md")
+        # Defense in depth: even after _safe_concept_id, confirm the
+        # resolved path is still actually inside output_dir before writing.
+        output_dir_real = os.path.realpath(output_dir)
+        file_path_real = os.path.realpath(os.path.dirname(file_path))
+        if os.path.commonpath([output_dir_real, file_path_real]) != output_dir_real:
+            raise ValueError(f"Refusing to write outside output_dir: {concept_id!r}")
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(md)

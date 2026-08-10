@@ -302,6 +302,14 @@ other from plain text alone — add markdown links in your source text
 yourself, or post-process the generated `.md` files, if you want a linked
 concept graph rather than a flat one.
 
+**Security note:** if you use the dict/list input form with explicit `id`
+fields (rather than the directory-scan form, where IDs come from real
+filenames), those IDs are validated against path traversal — `id:
+"../../etc/evil"` or similar is rejected with `ValueError`, not silently
+written outside `output_dir`. This was a real bug caught by testing, not
+a hypothetical: an earlier version of this code did write outside the
+intended directory when given an adversarial `id`.
+
 ## Use cases
 
 **Semantic search / RAG** — embed your documents/chunks, `add()` them with

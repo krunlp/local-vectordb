@@ -211,4 +211,20 @@ assert os.path.exists("/tmp/testdb_okf_gen_out/sub/index.md")
 assert os.path.exists("/tmp/testdb_okf_gen_out/log.md")
 print("OKF bundle generation: round-trips cleanly through our own reader")
 
+# 9. Security: path traversal via a caller-supplied id must be rejected,
+#    not silently write outside output_dir. (This was a real bug, found
+#    and fixed after testing it against an adversarial input.)
+shutil.rmtree("/tmp/testdb_okf_traversal", ignore_errors=True)
+for bad_id in ["../../etc/evil", "/etc/passwd", "..", "a/../../b", "a//b"]:
+    try:
+        documents_to_okf(
+            [{"text": "x", "id": bad_id, "type": "Document"}],
+            "/tmp/testdb_okf_traversal",
+        )
+        raise AssertionError(f"path traversal id {bad_id!r} was NOT rejected")
+    except ValueError:
+        pass
+assert not os.path.exists("/etc/evil.md")
+print("OKF generation: path-traversal ids correctly rejected")
+
 print("\nALL TESTS PASSED")
