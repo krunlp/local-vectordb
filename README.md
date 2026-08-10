@@ -266,6 +266,42 @@ Notes, built and tested against Google's real reference bundles
 - Searchable text is `title + description + body`, so semantic search
   weighs the concept's own summary alongside its full content.
 
+## Generating OKF from your own documents
+
+The reverse direction — turn raw documents into a valid OKF bundle:
+
+```python
+from vectordb.okf_generate import documents_to_okf
+
+# every .txt/.md file in the directory becomes one concept
+result = documents_to_okf("/path/to/my/docs", "/path/to/output/bundle", default_type="Document")
+print(result)  # {"generated": 12}
+
+# or from in-memory data
+result = documents_to_okf(
+    [{"text": "...", "title": "Rate Limits", "type": "API Endpoint", "tags": ["api"]}],
+    "/path/to/output/bundle",
+)
+```
+
+What it produces, verified by round-tripping generated output back through
+`vectordb.okf`'s own reader (not just visual inspection):
+
+- One concept `.md` file per document, with `type`, a derived `title`
+  (from a markdown heading if present, a plausible title-like first line,
+  or the filename as a last resort — plain body text is never
+  misidentified as a title), a derived `description`, and a `generated:
+  {at, by}` provenance block (SPEC §5.2).
+- `index.md` at every directory level, in the bullet-list style Google's
+  own reference bundles use.
+- A `log.md` recording the generation event (SPEC §9).
+
+**What this does NOT do:** infer cross-links between your documents.
+There's no reliable way to know which documents should reference each
+other from plain text alone — add markdown links in your source text
+yourself, or post-process the generated `.md` files, if you want a linked
+concept graph rather than a flat one.
+
 ## Use cases
 
 **Semantic search / RAG** — embed your documents/chunks, `add()` them with

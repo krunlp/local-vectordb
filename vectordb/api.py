@@ -173,6 +173,23 @@ def ingest_okf(req: IngestOKFRequest):
     return result
 
 
+class GenerateOKFRequest(BaseModel):
+    source_dir: str  # directory of .txt/.md files on the server's filesystem
+    output_dir: str  # where to write the generated OKF bundle
+    default_type: str = "Document"
+
+
+@app.post("/generate_okf")
+def generate_okf(req: GenerateOKFRequest):
+    """Generate a valid OKF bundle from a directory of raw text/markdown
+    documents (the reverse of /ingest_okf). See vectordb.okf_generate."""
+    from .okf_generate import documents_to_okf
+    if not os.path.isdir(req.source_dir):
+        raise HTTPException(status_code=400, detail=f"Not a directory: {req.source_dir}")
+    result = documents_to_okf(req.source_dir, req.output_dir, default_type=req.default_type)
+    return result
+
+
 # -- record management -----------------------------------------------------
 
 @app.get("/items/{id}")

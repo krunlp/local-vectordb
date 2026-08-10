@@ -177,4 +177,38 @@ r = db6.hybrid_search("user accounts", k=2)
 assert "tables/users" in [x["id"] for x in r]
 print("OKF bundle ingestion: parsing, deprecated-skip, cross-links, search all verified")
 
+# 8. OKF bundle GENERATION (documents -> OKF), and round-trip it back
+#    through our own reader to confirm it's actually spec-conformant.
+from vectordb.okf_generate import documents_to_okf
+shutil.rmtree("/tmp/testdb_okf_gen_src", ignore_errors=True)
+shutil.rmtree("/tmp/testdb_okf_gen_out", ignore_errors=True)
+os.makedirs("/tmp/testdb_okf_gen_src/sub", exist_ok=True)
+with open("/tmp/testdb_okf_gen_src/plain.txt", "w") as f:
+    f.write("Plain Doc Title\n\nSome body text about this topic, spanning a couple "
+            "of sentences. It should end up as the description.\n")
+with open("/tmp/testdb_okf_gen_src/sub/nested.md", "w") as f:
+    f.write("# Nested Concept\n\nBody content for the nested concept.\n")
+
+gen_result = documents_to_okf("/tmp/testdb_okf_gen_src", "/tmp/testdb_okf_gen_out", default_type="Document")
+print("Generation result:", gen_result)
+assert gen_result == {"generated": 2}
+
+# round-trip: our own reader must parse what our own generator wrote
+roundtrip = load_bundle("/tmp/testdb_okf_gen_out")
+assert len(roundtrip) == 2
+rt_ids = {c.concept_id for c in roundtrip}
+assert rt_ids == {"plain", "sub/nested"}
+plain = next(c for c in roundtrip if c.concept_id == "plain")
+assert plain.title == "Plain Doc Title"
+assert plain.type == "Document"
+assert "description" not in plain.title  # sanity: title not duplicated into itself
+nested = next(c for c in roundtrip if c.concept_id == "sub/nested")
+assert nested.title == "Nested Concept"  # pulled from markdown heading
+
+# index.md files must exist and must themselves be excluded as concepts
+assert os.path.exists("/tmp/testdb_okf_gen_out/index.md")
+assert os.path.exists("/tmp/testdb_okf_gen_out/sub/index.md")
+assert os.path.exists("/tmp/testdb_okf_gen_out/log.md")
+print("OKF bundle generation: round-trips cleanly through our own reader")
+
 print("\nALL TESTS PASSED")
