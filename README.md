@@ -310,6 +310,33 @@ written outside `output_dir`. This was a real bug caught by testing, not
 a hypothetical: an earlier version of this code did write outside the
 intended directory when given an adversarial `id`.
 
+## OKF security notes (found by adversarial testing, not assumed safe)
+
+Ingesting an OKF bundle means reading and executing logic over content you
+may not fully trust (a cloned repo, an uploaded archive, a shared drive).
+Two things were tested adversarially and fixed, not just assumed fine:
+
+- **Symlink file exfiltration**: a bundle containing a symlink to a file
+  *outside* the bundle (crafted to look like a valid OKF concept) would
+  previously have its content silently read and indexed into your search
+  results — a real way for a malicious bundle to exfiltrate other files
+  the process can read. `load_bundle()` and `ingest_okf_bundle()` now
+  reject any symlink whose target resolves outside the bundle root.
+  Symlinks that stay *inside* the bundle (a legitimate internal alias)
+  still work correctly.
+- **YAML parser recursion crash**: a pathologically deeply-nested (but
+  syntactically valid) YAML value in one concept's frontmatter could
+  exceed Python's recursion limit and crash the *entire* bundle load —
+  taking every other concept down with the one bad file. Now caught and
+  treated the same as any other malformed concept: skipped, with the rest
+  of the bundle loading normally.
+- (Checked and found NOT to be an issue): YAML's classic "billion laughs"
+  alias-expansion memory bomb doesn't actually apply here — PyYAML shares
+  object references across aliases rather than deep-copying them, so wide
+  alias trees don't blow up memory the way they would in some other
+  parsers. Verified with a 10^12-element alias structure parsing in
+  milliseconds, not tested and assumed.
+
 ## Use cases
 
 **Semantic search / RAG** — embed your documents/chunks, `add()` them with

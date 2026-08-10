@@ -227,4 +227,41 @@ for bad_id in ["../../etc/evil", "/etc/passwd", "..", "a/../../b", "a//b"]:
 assert not os.path.exists("/etc/evil.md")
 print("OKF generation: path-traversal ids correctly rejected")
 
+# 10. Security: OKF bundle loading must not follow symlinks pointing
+#     outside the bundle (file-exfiltration risk from an untrusted bundle),
+#     but must still correctly follow symlinks that stay inside it.
+shutil.rmtree("/tmp/testdb_okf_symlink", ignore_errors=True)
+shutil.rmtree("/tmp/testdb_okf_symlink_target", ignore_errors=True)
+os.makedirs("/tmp/testdb_okf_symlink")
+os.makedirs("/tmp/testdb_okf_symlink_target")
+with open("/tmp/testdb_okf_symlink_target/outside.md", "w") as f:
+    f.write("---\ntype: Document\n---\n\nSHOULD-NOT-BE-READABLE\n")
+os.symlink("/tmp/testdb_okf_symlink_target/outside.md", "/tmp/testdb_okf_symlink/looks-normal.md")
+with open("/tmp/testdb_okf_symlink/real.md", "w") as f:
+    f.write("---\ntype: Document\ntitle: Real\n---\n\nreal content\n")
+os.symlink("/tmp/testdb_okf_symlink/real.md", "/tmp/testdb_okf_symlink/internal-alias.md")
+
+external_concepts = load_bundle("/tmp/testdb_okf_symlink")
+external_ids = {c.concept_id for c in external_concepts}
+assert "looks-normal" not in external_ids, "SYMLINK ESCAPED BUNDLE -- file exfiltration risk"
+assert "real" in external_ids and "internal-alias" in external_ids  # legit internal symlinks still work
+print("OKF loading: external symlinks blocked, internal symlinks still work")
+
+# 11. Robustness: a pathologically deep (but syntactically valid) YAML
+#     frontmatter must be skipped as malformed, not crash the whole
+#     bundle load and take every OTHER concept down with it.
+shutil.rmtree("/tmp/testdb_okf_recursion", ignore_errors=True)
+os.makedirs("/tmp/testdb_okf_recursion")
+depth = 3000
+nested_yaml = "[" * depth + "1" + "]" * depth
+with open("/tmp/testdb_okf_recursion/malicious.md", "w") as f:
+    f.write(f"---\ntype: Document\nnested: {nested_yaml}\n---\n\nbody\n")
+with open("/tmp/testdb_okf_recursion/sibling.md", "w") as f:
+    f.write("---\ntype: Document\ntitle: Sibling\n---\n\nfine\n")
+
+recursion_concepts = load_bundle("/tmp/testdb_okf_recursion")
+assert len(recursion_concepts) == 1
+assert recursion_concepts[0].concept_id == "sibling"
+print("OKF loading: pathological YAML depth skipped without crashing sibling concepts")
+
 print("\nALL TESTS PASSED")

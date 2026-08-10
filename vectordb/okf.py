@@ -131,6 +131,16 @@ def parse_concept(bundle_root: str, rel_path: str) -> Optional[OKFConcept]:
         frontmatter = yaml.safe_load(frontmatter_raw) or {}
     except yaml.YAMLError:
         return None
+    except RecursionError:
+        # A pathologically deeply-nested (but otherwise valid) YAML
+        # structure can exceed Python's recursion limit inside PyYAML's
+        # recursive-descent parser. This must NOT propagate: one malformed
+        # or malicious concept file would otherwise crash the entire
+        # load_bundle()/ingest_okf_bundle() call, taking down every other
+        # concept in the bundle along with it -- directly contradicting
+        # the spec's requirement that consumers tolerate malformed content
+        # (§4.1, §11). Treat it the same as any other unparseable frontmatter.
+        return None
     if not isinstance(frontmatter, dict) or "type" not in frontmatter:
         return None
 
@@ -155,15 +165,39 @@ def parse_concept(bundle_root: str, rel_path: str) -> Optional[OKFConcept]:
     )
 
 
+def _is_safe_bundle_file(bundle_root: str, dirpath: str, fn: str) -> bool:
+    """Reject symlinked files whose real target resolves outside the
+    bundle. Without this, a bundle containing a symlink to an OKF-shaped
+    file elsewhere on disk (e.g. /etc/some_file crafted with frontmatter,
+    or any other file the process can read) gets silently read and
+    indexed -- a real file-exfiltration vector for a bundle from an
+    untrusted source (a cloned repo, an uploaded archive, etc). Symlinked
+    *directories* are already safe by default since os.walk uses
+    followlinks=False; this closes the remaining per-file gap."""
+    full_path = os.path.join(dirpath, fn)
+    if not os.path.islink(full_path):
+        return True
+    bundle_real = os.path.realpath(bundle_root)
+    target_real = os.path.realpath(full_path)
+    try:
+        return os.path.commonpath([bundle_real, target_real]) == bundle_real
+    except ValueError:
+        return False  # different drives on Windows, etc -- treat as unsafe
+
+
 def load_bundle(bundle_root: str) -> List[OKFConcept]:
     """Walk an OKF bundle directory and parse every concept document.
     Reserved filenames (index.md, log.md) are skipped at every level, per
     SPEC §3.1. Files with no frontmatter/type are silently skipped, per the
-    spec's requirement that consumers tolerate non-conformant content."""
+    spec's requirement that consumers tolerate non-conformant content.
+    Symlinks pointing outside the bundle are skipped (see
+    _is_safe_bundle_file) rather than followed."""
     concepts = []
     for dirpath, _dirnames, filenames in os.walk(bundle_root):
         for fn in filenames:
             if not fn.endswith(".md") or fn in RESERVED_FILENAMES:
+                continue
+            if not _is_safe_bundle_file(bundle_root, dirpath, fn):
                 continue
             rel_path = os.path.relpath(os.path.join(dirpath, fn), bundle_root)
             rel_path = rel_path.replace(os.sep, "/")  # stable IDs across OSes
@@ -201,6 +235,8 @@ def ingest_okf_bundle(
     for dirpath, _dirnames, filenames in os.walk(bundle_root):
         for fn in filenames:
             if fn.endswith(".md") and fn not in RESERVED_FILENAMES:
+                if not _is_safe_bundle_file(bundle_root, dirpath, fn):
+                    continue
                 all_files.append(os.path.relpath(os.path.join(dirpath, fn), bundle_root))
 
     indexed = 0
