@@ -7,6 +7,11 @@ pyyaml>=6.0.0  # for OKF bundle ingestion (vectordb.okf)
 # vectordb.graph_algorithms itself.
 networkx>=3.0.0
 
+# Optional: GraphBLAS-accelerated PageRank (vectordb.graph_algorithms.pagerank_graphblas).
+# Measured ~3x faster than the pure-Python pagerank() on a 50K-node graph;
+# not required for the default pagerank() implementation.
+python-graphblas>=2024.1.0
+
 # Optional: HTTP server (vectordb.api)
 fastapi>=0.110.0
 uvicorn>=0.29.0

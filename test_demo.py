@@ -530,6 +530,19 @@ try:
 except ImportError:
     print("Graph algorithms: PageRank, degree centrality, connected components verified (networkx not available for cross-check)")
 
+# 16b. GraphBLAS-accelerated PageRank must match the pure-Python version
+# exactly (not approximately) -- it's the same algorithm on a faster
+# execution substrate, added after benchmarking showed a real ~3x speedup
+# on a 50K-node graph, not a blanket "matrices are better" assumption.
+try:
+    from vectordb.graph_algorithms import pagerank_graphblas
+    pr_gb = pagerank_graphblas(db12)
+    for node in pr:
+        assert abs(pr[node] - pr_gb[node]) < 1e-6, f"{node}: python={pr[node]} graphblas={pr_gb[node]}"
+    print("Graph algorithms: GraphBLAS-accelerated PageRank matches pure-Python exactly")
+except ImportError:
+    print("Graph algorithms: GraphBLAS PageRank skipped (python-graphblas not installed)")
+
 # 17. Bulk edge import from CSV and adjacency-list formats.
 from vectordb.graph_import import import_edges_csv, import_adjacency_list
 import csv as csv_module

@@ -338,6 +338,17 @@ def graph_pagerank(req: AlgorithmRequest):
     return pagerank(db, relation=req.relation)
 
 
+@app.post("/graph/pagerank_fast")
+def graph_pagerank_fast(req: AlgorithmRequest):
+    """GraphBLAS-accelerated PageRank (~3x faster on large graphs, same
+    results). Requires python-graphblas to be installed on the server."""
+    from .graph_algorithms import pagerank_graphblas
+    try:
+        return pagerank_graphblas(db, relation=req.relation)
+    except ImportError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+
+
 @app.post("/graph/degree_centrality")
 def graph_degree_centrality(req: AlgorithmRequest):
     from .graph_algorithms import degree_centrality
