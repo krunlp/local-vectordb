@@ -345,19 +345,18 @@ records) plus a cost-based query planner refined over more than a
 decade. Neither is what this project is.
 
 **Genuinely closeable, and now closed:**
-- ✅ Graph algorithms (PageRank, centrality, connected components) — this session
-- ✅ A declarative query language (small Cypher subset) — see above
-- ✅ Correctness hardening (cycles, dangling edges, crash-recovery cleanup, silent-truncation signaling) — extensively adversarially tested
-
-**Genuinely closeable, not yet done (realistic next steps if this keeps
-growing):**
-- Weighted shortest path (Dijkstra) using edge metadata — `shortest_path()`
-  is currently unweighted hop-count only
-- More query language grammar: `OR`, inequality/range conditions,
-  `ORDER BY`/`LIMIT`, basic aggregation (`COUNT`)
-- Bulk edge import from CSV/adjacency-list formats
-- Concurrent-write stress testing specifically for the edges table at
-  higher thread counts than tested so far
+- ✅ Graph algorithms (PageRank, centrality, connected components)
+- ✅ A declarative query language (small Cypher subset), now including
+  `OR`, comparison operators (`>`, `<`, `>=`, `<=`, `!=`), `ORDER BY`, `LIMIT`
+- ✅ Weighted shortest path (`shortest_path_weighted()`, Dijkstra) —
+  cross-checked against `networkx` on a case specifically constructed so
+  the weighted and unweighted answers genuinely diverge, not just two
+  runs that happen to agree
+- ✅ Bulk edge import from CSV and adjacency-list formats
+- ✅ Higher-concurrency stress testing (32 threads: 16 concurrent edge
+  writers + 16 concurrent graph readers, zero errors)
+- ✅ Correctness hardening (cycles, dangling edges, crash-recovery
+  cleanup, silent-truncation signaling) — extensively adversarially tested
 
 **Not closeable without becoming a fundamentally different project:**
 - Matrix-native or index-free adjacency execution (the actual
@@ -368,12 +367,13 @@ growing):**
 - Full Cypher/Gremlin language compliance
 - Years of production hardening, multi-language drivers, ecosystem tooling
 
-The honest framing, unchanged from earlier in this conversation: this is
-a correctness-hardened, algorithmically-real graph layer bolted onto a
-vector DB — meaningfully more capable than it was, still not a graph
-database in the category Neo4j or FalkorDB occupy, and closing the
-remaining gap would mean rewriting the storage engine, not adding more
-Python functions.
+The honest framing: every item that was realistically closeable without
+rearchitecting has now been built and tested. What's left in the second
+list isn't a backlog — it's a different category of system. This is a
+correctness-hardened, algorithmically-real graph layer with a real (if
+small) query language, bolted onto a vector DB. It is not, and structurally
+cannot become without a storage-engine rewrite, a graph database in the
+category Neo4j or FalkorDB occupy.
 
 ## Capacity planning
 

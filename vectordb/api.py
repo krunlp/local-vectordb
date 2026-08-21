@@ -251,6 +251,23 @@ class ShortestPathRequest(BaseModel):
     direction: str = "both"
 
 
+class ShortestPathWeightedRequest(BaseModel):
+    source: str
+    target: str
+    relation: Optional[str] = None
+    direction: str = "both"
+    weight_field: str = "weight"
+
+
+@app.post("/shortest_path_weighted")
+def shortest_path_weighted(req: ShortestPathWeightedRequest):
+    result = db.shortest_path_weighted(
+        req.source, req.target, relation=req.relation, direction=req.direction,
+        weight_field=req.weight_field,
+    )
+    return result if result is not None else {"path": None, "total_weight": None}
+
+
 class GraphSearchRequest(BaseModel):
     vector: List[float]
     k: int = 10

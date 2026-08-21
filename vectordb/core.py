@@ -573,6 +573,66 @@ class VectorDB:
             unique_edges = sorted(set(edges_seen))
             return {"nodes": visited, "edges": unique_edges, "truncated": truncated}
 
+    def shortest_path_weighted(
+        self, source_id: str, target_id: str, relation: Optional[str] = None,
+        direction: str = "both", weight_field: str = "weight", default_weight: float = 1.0,
+        max_nodes: int = 100_000,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Dijkstra's algorithm: shortest path by total edge weight, not hop
+        count (contrast with shortest_path(), which is unweighted BFS).
+        Edge weight is read from that edge's metadata[weight_field]
+        (default key "weight"); edges missing this field use
+        default_weight. All weights must be non-negative -- Dijkstra is
+        not correct with negative weights (that needs Bellman-Ford, which
+        this doesn't implement).
+
+        Returns {"path": [ids...], "total_weight": float}, or None if
+        unreachable within max_nodes explored.
+        """
+        import heapq
+
+        if source_id == target_id:
+            return {"path": [source_id], "total_weight": 0.0}
+
+        with self._lock:
+            dist = {source_id: 0.0}
+            parent: Dict[str, str] = {}
+            visited: set = set()
+            heap = [(0.0, source_id)]
+            explored = 0
+
+            while heap and explored < max_nodes:
+                d, node = heapq.heappop(heap)
+                if node in visited:
+                    continue
+                visited.add(node)
+                explored += 1
+                if node == target_id:
+                    path = [node]
+                    while path[-1] != source_id:
+                        path.append(parent[path[-1]])
+                    return {"path": list(reversed(path)), "total_weight": d}
+
+                for source, target, _rel, edge_meta in self.store.get_edges(
+                    node, relation=relation, direction=direction
+                ):
+                    neighbor = target if source == node else source
+                    if neighbor in visited:
+                        continue
+                    w = edge_meta.get(weight_field, default_weight)
+                    if w < 0:
+                        raise ValueError(
+                            f"Negative edge weight ({w}) on edge {source!r}->{target!r} "
+                            "-- Dijkstra requires non-negative weights"
+                        )
+                    new_dist = d + w
+                    if neighbor not in dist or new_dist < dist[neighbor]:
+                        dist[neighbor] = new_dist
+                        parent[neighbor] = node
+                        heapq.heappush(heap, (new_dist, neighbor))
+            return None
+
     def shortest_path(
         self, source_id: str, target_id: str, relation: Optional[str] = None,
         direction: str = "both", max_depth: int = 10,

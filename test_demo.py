@@ -307,6 +307,48 @@ db7.delete("g_c")
 assert "g_c" not in db7.get_neighbors("g_b", direction="out")
 print("Graph: edges, neighbors, traversal, shortest_path, graph_search, delete-cleanup all verified")
 
+# 12b. Weighted shortest path (Dijkstra) -- must genuinely diverge from
+# unweighted BFS shortest_path when a "shorter in hops" path is more
+# expensive in total weight. Cross-checked against networkx.
+shutil.rmtree("/tmp/testdb_dijkstra", ignore_errors=True)
+db7b = VectorDB("/tmp/testdb_dijkstra", dim=4)
+for did in ["ds", "da", "db_", "dt"]:
+    db7b.add(did, np.random.randn(4).astype(np.float32))
+db7b.add_edge("ds", "dt", metadata={"weight": 100})
+db7b.add_edge("ds", "da", metadata={"weight": 1})
+db7b.add_edge("da", "db_", metadata={"weight": 1})
+db7b.add_edge("db_", "dt", metadata={"weight": 1})
+
+unweighted = db7b.shortest_path("ds", "dt")
+assert unweighted == ["ds", "dt"]  # 1-hop, ignores weight
+weighted = db7b.shortest_path_weighted("ds", "dt")
+assert weighted["path"] == ["ds", "da", "db_", "dt"]
+assert weighted["total_weight"] == 3.0
+
+try:
+    import networkx as nx
+    G = nx.Graph()
+    G.add_edge("ds", "dt", weight=100)
+    G.add_edge("ds", "da", weight=1)
+    G.add_edge("da", "db_", weight=1)
+    G.add_edge("db_", "dt", weight=1)
+    nx_path = nx.shortest_path(G, "ds", "dt", weight="weight")
+    assert weighted["path"] == nx_path
+    print("Weighted shortest_path (Dijkstra): matches networkx, correctly diverges from unweighted BFS")
+except ImportError:
+    print("Weighted shortest_path (Dijkstra): correct (networkx not available for cross-check)")
+
+# unreachable and negative-weight cases
+db7b.add("d_isolated", np.random.randn(4).astype(np.float32))
+assert db7b.shortest_path_weighted("ds", "d_isolated") is None
+db7b.add_edge("ds", "d_isolated", metadata={"weight": -1})
+try:
+    db7b.shortest_path_weighted("ds", "d_isolated")
+    raise AssertionError("should have rejected negative edge weight")
+except ValueError:
+    pass
+print("Weighted shortest_path: unreachable and negative-weight cases handled correctly")
+
 # 13. Regression: search() must degrade gracefully (not crash with a
 #     cryptic hnswlib error) when the metadata store and HNSW index
 #     disagree on count -- e.g. from the same unsaved-write scenario
@@ -379,7 +421,7 @@ no_match = run_query(db10, "MATCH (a)-[:references]->(b) WHERE a.id = 'nonexiste
 assert no_match == {"rows": [], "truncated": False}
 
 for bad_query in [
-    "MATCH (a)-[:references]->(b) WHERE a.id = 'x' OR b.id = 'y' RETURN a",
+    "MATCH (a)-[:references]->(b) WHERE a.id = 'x' AND (b.id = 'y' OR b.id = 'z') RETURN a",  # nested parens unsupported
     "MATCH (a)-[:references]->(b) WHERE c.id = 'x' RETURN a",
     "WHERE a.id = 'x' RETURN a",
     "MATCH (a)-[:references]->(b) WHERE a.id = 'x'",
@@ -407,6 +449,50 @@ assert uncapped["truncated"] == False
 assert len(uncapped["rows"]) == 100
 print("Query language: truncation flag correctly propagates from traverse() through run_query")
 print("Query language: single-hop, variable-length, filters, full-scan, and error handling all verified")
+
+# 15b. Query language grammar expansion: OR, comparison operators,
+# ORDER BY, LIMIT. Tested against hand-computed expected results.
+shutil.rmtree("/tmp/testdb_query_v2", ignore_errors=True)
+db10b = VectorDB("/tmp/testdb_query_v2", dim=4)
+qv2_docs = {
+    "qp1": {"type": "Policy", "priority": 1},
+    "qp2": {"type": "Policy", "priority": 5},
+    "qm1": {"type": "Metric", "priority": 3},
+    "qm2": {"type": "Metric", "priority": 8},
+    "qm3": {"type": "Metric", "priority": 2},
+}
+for qid, qmeta in qv2_docs.items():
+    db10b.add(qid, np.random.randn(4).astype(np.float32), qmeta)
+db10b.add_edge("qp1", "qm1")
+db10b.add_edge("qp1", "qm2")
+db10b.add_edge("qp1", "qm3")
+db10b.add_edge("qp2", "qm1")
+
+or_result = run_query(db10b, "MATCH (a)-[:related]->(b) WHERE a.id = 'qp1' OR a.id = 'qp2' RETURN a.id, b.id")
+assert len(or_result["rows"]) == 4
+
+gt_result = run_query(db10b, "MATCH (a)-[:related]->(b) WHERE a.id = 'qp1' AND b.priority > 2 RETURN b.id")
+assert {r["b.id"] for r in gt_result["rows"]} == {"qm1", "qm2"}
+
+range_result = run_query(db10b, "MATCH (a)-[:related]->(b) WHERE a.id = 'qp1' AND b.priority >= 2 AND b.priority <= 3 RETURN b.id")
+assert {r["b.id"] for r in range_result["rows"]} == {"qm1", "qm3"}
+
+neq_result = run_query(db10b, "MATCH (a)-[:related]->(b) WHERE a.id = 'qp1' AND b.id != 'qm1' RETURN b.id")
+assert sorted(r["b.id"] for r in neq_result["rows"]) == ["qm2", "qm3"]
+
+order_asc = run_query(db10b, "MATCH (a)-[:related]->(b) WHERE a.id = 'qp1' RETURN b.id ORDER BY b.priority ASC")
+assert [r["b.id"] for r in order_asc["rows"]] == ["qm3", "qm1", "qm2"]
+
+order_desc_limit = run_query(db10b, "MATCH (a)-[:related]->(b) WHERE a.id = 'qp1' RETURN b.id ORDER BY b.priority DESC LIMIT 2")
+assert [r["b.id"] for r in order_desc_limit["rows"]] == ["qm2", "qm1"]
+
+# unsupported: nested/parenthesized boolean expressions must still raise
+try:
+    run_query(db10b, "MATCH (a)-[:related]->(b) WHERE a.id = 'qp1' AND (b.id = 'qm1' OR b.id = 'qm2') RETURN a")
+    raise AssertionError("nested parens should have raised QueryError")
+except QueryError:
+    pass
+print("Query language: OR, comparison operators, ORDER BY, LIMIT all verified against hand-computed results")
 
 # 16. Graph algorithms: PageRank, degree centrality, connected components.
 # Cross-checked against networkx (an independent reference implementation)
@@ -443,5 +529,82 @@ try:
     print("Graph algorithms: PageRank verified against networkx (independent reference) -- matches")
 except ImportError:
     print("Graph algorithms: PageRank, degree centrality, connected components verified (networkx not available for cross-check)")
+
+# 17. Bulk edge import from CSV and adjacency-list formats.
+from vectordb.graph_import import import_edges_csv, import_adjacency_list
+import csv as csv_module
+import threading
+
+shutil.rmtree("/tmp/testdb_import", ignore_errors=True)
+db13 = VectorDB("/tmp/testdb_import", dim=4)
+for iid in ["i1", "i2", "i3", "i4"]:
+    db13.add(iid, np.random.randn(4).astype(np.float32))
+
+csv_path = "/tmp/testdb_import_edges.csv"
+with open(csv_path, "w", newline="") as f:
+    w = csv_module.writer(f)
+    w.writerow(["source", "target", "rel_type", "weight"])
+    w.writerow(["i1", "i2", "follows", "1.5"])
+    w.writerow(["i2", "i3", "follows", "2.0"])
+    w.writerow(["i1", "i3", "", ""])   # missing relation -> must use default, not empty string
+    w.writerow(["", "i4", "follows", "1.0"])  # missing source -> must be skipped, not crash
+
+csv_result = import_edges_csv(
+    db13, csv_path, source_col="source", target_col="target", relation_col="rel_type",
+    default_relation="related", metadata_cols=["weight"],
+)
+assert csv_result == {"imported": 3, "skipped": 1}
+i1_neighbors = db13.get_neighbors("i1", direction="out", with_metadata=True)
+i1_to_i2 = next(n for n in i1_neighbors if n["id"] == "i2")
+assert i1_to_i2["relation"] == "follows"
+assert i1_to_i2["edge_metadata"]["weight"] == 1.5
+i1_to_i3 = next(n for n in i1_neighbors if n["id"] == "i3")
+assert i1_to_i3["relation"] == "related"  # empty CSV cell correctly fell back to default, not ""
+
+adj_path = "/tmp/testdb_import_adj.txt"
+with open(adj_path, "w") as f:
+    f.write("# comment\ni1 i2 i3\n\ni2 i3\ni4\n")
+adj_result = import_adjacency_list(db13, adj_path, relation="linked")
+assert adj_result == {"imported": 3}
+assert set(db13.get_neighbors("i1", direction="out", relation="linked")) == {"i2", "i3"}
+print("Bulk edge import: CSV (with default-relation and skip-malformed-row fix) and adjacency-list both verified")
+
+# 18. High-concurrency stress test specifically on the edges table.
+shutil.rmtree("/tmp/testdb_edge_concurrency", ignore_errors=True)
+db14 = VectorDB("/tmp/testdb_edge_concurrency", dim=8, max_elements=5000)
+for i in range(200):
+    db14.add(f"cn{i}", np.random.randn(8).astype(np.float32))
+
+concurrency_errors = []
+
+def _edge_writer(tid):
+    import random
+    rng = random.Random(tid)
+    try:
+        for _ in range(200):
+            src, tgt = f"cn{rng.randrange(200)}", f"cn{rng.randrange(200)}"
+            db14.add_edge(src, tgt, relation="r")
+    except Exception as e:
+        concurrency_errors.append(("writer", tid, str(e)))
+
+def _graph_reader(tid):
+    import random
+    rng = random.Random(tid + 1000)
+    try:
+        for _ in range(200):
+            node = f"cn{rng.randrange(200)}"
+            db14.get_neighbors(node, direction="both")
+            db14.traverse(node, max_depth=2, max_nodes=50)
+    except Exception as e:
+        concurrency_errors.append(("reader", tid, str(e)))
+
+threads = [threading.Thread(target=_edge_writer, args=(i,)) for i in range(16)]
+threads += [threading.Thread(target=_graph_reader, args=(i,)) for i in range(16)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+assert len(concurrency_errors) == 0, f"concurrency errors: {concurrency_errors[:3]}"
+print(f"High-concurrency edge stress test: 32 threads, edge_count={db14.edge_count()}, zero errors")
 
 print("\nALL TESTS PASSED")
