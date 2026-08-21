@@ -363,19 +363,20 @@ db10.add_edge("q_policy", "q_metric", relation="references")
 db10.add_edge("q_metric", "q_calc", relation="references")
 
 r = run_query(db10, "MATCH (a)-[:references]->(b) WHERE a.id = 'q_policy' RETURN b.id, b.title")
-assert r == [{"b.id": "q_metric", "b.title": "Revenue"}]
+assert r == {"rows": [{"b.id": "q_metric", "b.title": "Revenue"}], "truncated": False}
 
 r2 = run_query(db10, "MATCH (a)-[:references*1..2]->(b) WHERE a.id = 'q_policy' RETURN b.id")
-assert {row["b.id"] for row in r2} == {"q_metric", "q_calc"}
+assert {row["b.id"] for row in r2["rows"]} == {"q_metric", "q_calc"}
+assert r2["truncated"] == False
 
 r3 = run_query(db10, "MATCH (a)-[:references*1..2]->(b) WHERE a.id = 'q_policy' AND b.type = 'Computation' RETURN b.id")
-assert r3 == [{"b.id": "q_calc"}]
+assert r3["rows"] == [{"b.id": "q_calc"}]
 
 r4 = run_query(db10, "MATCH (a)-[:references]->(b) WHERE a.type = 'Policy' RETURN a.title, b.title")
-assert r4 == [{"a.title": "Revenue Policy", "b.title": "Revenue"}]  # full-scan start (no a.id constraint)
+assert r4["rows"] == [{"a.title": "Revenue Policy", "b.title": "Revenue"}]  # full-scan start (no a.id constraint)
 
 no_match = run_query(db10, "MATCH (a)-[:references]->(b) WHERE a.id = 'nonexistent' RETURN b")
-assert no_match == []
+assert no_match == {"rows": [], "truncated": False}
 
 for bad_query in [
     "MATCH (a)-[:references]->(b) WHERE a.id = 'x' OR b.id = 'y' RETURN a",
@@ -388,6 +389,23 @@ for bad_query in [
         raise AssertionError(f"should have raised QueryError: {bad_query!r}")
     except QueryError:
         pass
+
+# truncation must propagate through run_query, not just traverse() itself --
+# this was the actual gap found: run_query previously ignored traverse()'s
+# own truncation flag entirely. Test it directly with a small max_nodes.
+shutil.rmtree("/tmp/testdb_query_truncation", ignore_errors=True)
+db11 = VectorDB("/tmp/testdb_query_truncation", dim=4, max_elements=200)
+db11.add(["hub"] + [f"leaf{i}" for i in range(100)], np.random.randn(101, 4).astype(np.float32))
+db11.add_edges([{"source": "hub", "target": f"leaf{i}", "relation": "r"} for i in range(100)])
+
+capped = run_query(db11, "MATCH (a)-[:r]->(b) WHERE a.id = 'hub' RETURN b.id", max_nodes=10)
+assert capped["truncated"] == True
+assert len(capped["rows"]) < 100  # genuinely incomplete, and now honestly labeled as such
+
+uncapped = run_query(db11, "MATCH (a)-[:r]->(b) WHERE a.id = 'hub' RETURN b.id", max_nodes=1000)
+assert uncapped["truncated"] == False
+assert len(uncapped["rows"]) == 100
+print("Query language: truncation flag correctly propagates from traverse() through run_query")
 print("Query language: single-hop, variable-length, filters, full-scan, and error handling all verified")
 
 print("\nALL TESTS PASSED")

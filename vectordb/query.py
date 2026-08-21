@@ -140,11 +140,19 @@ def _node_matches(node_id: str, metadata: Optional[Dict[str, Any]], conditions: 
     return True
 
 
-def run_query(db, query: str) -> List[Dict[str, Any]]:
+def run_query(db, query: str, max_nodes: int = 1000) -> Dict[str, Any]:
     """Execute a query string (see module docstring for grammar) against a
-    VectorDB's graph. Returns a list of result rows, each a dict keyed by
-    the RETURN clause's items (e.g. {"a.id": ..., "b.title": ...} or
-    {"a": {"id":..., "metadata":...}} for a bare variable)."""
+    VectorDB's graph. Returns {"rows": [...], "truncated": bool} -- each
+    row is a dict keyed by the RETURN clause's items (e.g. {"a.id": ...,
+    "b.title": ...} or {"a": {"id":..., "metadata":...}} for a bare
+    variable). "truncated" is True if any underlying traversal hit its
+    max_nodes safety cap (see VectorDB.traverse) -- meaning "rows" may be
+    missing results that would have matched a variable-length pattern on a
+    densely connected graph. Always check this on multi-hop queries over
+    graphs you haven't bounded the size of; silently trusting "rows" as
+    complete is exactly the mistake this flag exists to prevent (this
+    module originally didn't check traverse()'s own truncation flag at
+    all, discovered and fixed after specifically testing for it)."""
     parsed = parse_query(query)
     var_a, var_b = parsed["var_a"], parsed["var_b"]
     conditions = parsed["conditions"]
@@ -168,10 +176,14 @@ def run_query(db, query: str) -> List[Dict[str, Any]]:
                 start_ids.append(node_id)
 
     rows = []
+    any_truncated = False
     for start_id in start_ids:
         traversal = db.traverse(
-            start_id, max_depth=parsed["max_hops"], relation=parsed["relation"], direction="out",
+            start_id, max_depth=parsed["max_hops"], relation=parsed["relation"],
+            direction="out", max_nodes=max_nodes,
         )
+        if traversal.get("truncated"):
+            any_truncated = True
         for node_id, depth in traversal["nodes"].items():
             if depth < parsed["min_hops"] or depth > parsed["max_hops"]:
                 continue
@@ -205,4 +217,4 @@ def run_query(db, query: str) -> List[Dict[str, Any]]:
                     row[f"{var}.{field}"] = (meta_val or {}).get(field)
             rows.append(row)
 
-    return rows
+    return {"rows": rows, "truncated": any_truncated}

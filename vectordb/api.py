@@ -301,10 +301,12 @@ class QueryRequest(BaseModel):
 def query(req: QueryRequest):
     """Run a small Cypher-like query against the graph. See vectordb.query
     for the supported grammar (a real but intentionally small subset --
-    not a Cypher implementation)."""
+    not a Cypher implementation). Response includes "truncated": true if
+    a variable-length pattern hit its internal traversal cap on a densely
+    connected graph -- rows may be incomplete in that case."""
     from .query import run_query, QueryError
     try:
-        return {"results": run_query(db, req.query)}
+        return run_query(db, req.query)
     except QueryError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

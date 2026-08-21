@@ -235,7 +235,24 @@ Notes:
   weight) — fine for "how are these connected" questions, not meant for
   weighted-shortest-path use cases.
 - Deleting a record (`db.delete()`) also removes every edge touching it,
-  so the graph doesn't accumulate edges pointing at nothing.
+  so the graph doesn't accumulate edges pointing at nothing. This cleanup
+  also runs during `compact()`'s crash-recovery path, not just `delete()`
+  — found as a real gap during testing (a crash-orphaned record's edges
+  survived compact() and pointed at an id that would never exist again),
+  now fixed.
+- **`traverse()` (and anything built on it — `graph_search()`, the query
+  language's variable-length patterns) returns `truncated: bool`.** A
+  densely connected graph can hit the `max_nodes` safety cap before
+  finishing; without this flag, a truncated result looks identical to a
+  complete one. This was tested and found missing, then added — check it
+  rather than assuming a returned node/row count is the whole picture on
+  any graph you haven't explicitly bounded the size of.
+- Performance: tested up to 50,000 nodes / ~250,000 edges — 3-hop
+  traversal and shortest-path both stayed well under a second, and a
+  full-database-scan query (no `id` anchor) over 50K records took ~0.3s.
+  The one-SQL-query-per-node pattern during traversal turned out not to
+  be a practical bottleneck at this scale, verified rather than assumed
+  either way.
 - **OKF integration**: `ingest_okf_bundle()` automatically turns each
   concept's markdown cross-links (already extracted per SPEC §6.1) into
   real graph edges (`relation="references"`), so an ingested OKF bundle is
@@ -254,9 +271,8 @@ traversal code every time:
 ```python
 from vectordb.query import run_query
 
-run_query(db, "MATCH (a)-[:references]->(b) WHERE a.id = 'policy1' RETURN b.id, b.title")
-run_query(db, "MATCH (a)-[:references*1..3]->(b) WHERE a.type = 'Policy' AND b.type = 'Metric' RETURN a.title, b.title")
-run_query(db, "MATCH (a)-[:references]->(b) WHERE a.id = 'policy1' RETURN b")  # full node dict
+result = run_query(db, "MATCH (a)-[:references]->(b) WHERE a.id = 'policy1' RETURN b.id, b.title")
+print(result)  # {"rows": [...], "truncated": False}
 ```
 
 Also exposed via `POST /query`.
@@ -269,6 +285,12 @@ that one id and traverses outward (same cost as `traverse()`). If it
 doesn't, every active record is scanned as a candidate start node — a real
 full-database scan, same cost category as an unindexed Cypher `MATCH`
 would be, and should be expected to be slow on a large DB.
+
+**`truncated: true` in the result means the rows may be incomplete** —
+some underlying multi-hop traversal hit its safety cap (`max_nodes`,
+passed through as `run_query(db, query, max_nodes=...)`) on a densely
+connected graph before it finished exploring. Always check this on
+variable-length queries over graphs you haven't bounded the size of.
 
 **Deliberately NOT supported**, and raises `QueryError` with a specific
 reason rather than silently returning wrong results if you try: `OR`,

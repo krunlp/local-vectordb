@@ -525,15 +525,25 @@ class VectorDB:
     ) -> Dict[str, Any]:
         """
         Breadth-first traversal from start_id out to max_depth hops.
-        Returns {"nodes": {id: depth, ...}, "edges": [(source, target, relation), ...]}
-        covering every node/edge visited. Stops early (may be incomplete)
-        if max_nodes is reached, to bound cost on a densely connected graph.
+        Returns {"nodes": {id: depth, ...}, "edges": [(source, target, relation), ...],
+        "truncated": bool} covering every node/edge visited.
+
+        "truncated" is True if max_nodes was hit before the traversal
+        would have naturally finished -- meaning the graph has MORE
+        connected nodes than are reflected in "nodes" here. Always check
+        this rather than assuming a returned node count reflects the
+        whole reachable subgraph; a caller silently treating a truncated
+        result as complete is exactly the kind of bug that's easy to miss
+        (found by testing a 500-node hub graph against the default
+        max_nodes=1000 -- it looked like a complete, correct result with
+        no indication anything was cut off, until this flag was added).
         """
         with self._lock:
             visited = {start_id: 0}
             frontier = [start_id]
             edges_seen = []
             depth = 0
+            truncated = False
             while frontier and depth < max_depth and len(visited) < max_nodes:
                 next_frontier = []
                 for node in frontier:
@@ -543,17 +553,25 @@ class VectorDB:
                         neighbor = target if source == node else source
                         edges_seen.append((source, target, rel))
                         if neighbor not in visited:
+                            if len(visited) >= max_nodes:
+                                truncated = True
+                                break
                             visited[neighbor] = depth + 1
                             next_frontier.append(neighbor)
-                            if len(visited) >= max_nodes:
-                                break
                     if len(visited) >= max_nodes:
                         break
+                # If there's still a next_frontier left unexplored because we
+                # hit max_depth (not max_nodes), that's normal completion,
+                # not truncation -- only flag it if nodes existed beyond the
+                # cap we didn't get to add, or if the frontier itself was cut
+                # off mid-iteration above.
+                if next_frontier and len(visited) >= max_nodes and depth + 1 < max_depth:
+                    truncated = True
                 frontier = next_frontier
                 depth += 1
             # dedup edges (the same edge can be re-discovered from either endpoint)
             unique_edges = sorted(set(edges_seen))
-            return {"nodes": visited, "edges": unique_edges}
+            return {"nodes": visited, "edges": unique_edges, "truncated": truncated}
 
     def shortest_path(
         self, source_id: str, target_id: str, relation: Optional[str] = None,
