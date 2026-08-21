@@ -293,6 +293,22 @@ def graph_search(req: GraphSearchRequest):
     return {"results": results}
 
 
+class QueryRequest(BaseModel):
+    query: str  # e.g. "MATCH (a)-[:references*1..2]->(b) WHERE a.id = 'x' RETURN b.id, b.title"
+
+
+@app.post("/query")
+def query(req: QueryRequest):
+    """Run a small Cypher-like query against the graph. See vectordb.query
+    for the supported grammar (a real but intentionally small subset --
+    not a Cypher implementation)."""
+    from .query import run_query, QueryError
+    try:
+        return {"results": run_query(db, req.query)}
+    except QueryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/count")
 def count():
     return {"count": db.count()}

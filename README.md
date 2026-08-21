@@ -245,6 +245,38 @@ Notes:
   exists in the bundle's link graph but was excluded from search because
   it's marked `deprecated`.
 
+## Query language (small Cypher-like subset)
+
+A genuine but intentionally small subset of Cypher (Neo4j/FalkorDB's query
+language), for pattern-matching over the graph without hand-writing
+traversal code every time:
+
+```python
+from vectordb.query import run_query
+
+run_query(db, "MATCH (a)-[:references]->(b) WHERE a.id = 'policy1' RETURN b.id, b.title")
+run_query(db, "MATCH (a)-[:references*1..3]->(b) WHERE a.type = 'Policy' AND b.type = 'Metric' RETURN a.title, b.title")
+run_query(db, "MATCH (a)-[:references]->(b) WHERE a.id = 'policy1' RETURN b")  # full node dict
+```
+
+Also exposed via `POST /query`.
+
+**Supported:** `MATCH (a)-[:relation]->(b)` (exact hop count or
+`*min..max` variable-length paths), `WHERE var.field = 'value'`
+(AND-joined equality only), `RETURN var` or `var.field` (comma-separated).
+If `WHERE` constrains the start variable's `id`, the query starts from
+that one id and traverses outward (same cost as `traverse()`). If it
+doesn't, every active record is scanned as a candidate start node — a real
+full-database scan, same cost category as an unindexed Cypher `MATCH`
+would be, and should be expected to be slow on a large DB.
+
+**Deliberately NOT supported**, and raises `QueryError` with a specific
+reason rather than silently returning wrong results if you try: `OR`,
+inequality/range conditions, undirected patterns, multiple `MATCH`
+clauses, node labels, aggregation, `ORDER BY`/`LIMIT`,
+`CREATE`/`MERGE`/`SET`/`DELETE`. This is not Cypher — it's a small,
+honest slice of it.
+
 ## Capacity planning
 
 Real measured numbers (not estimates) at dim=128: **660 bytes/vector on

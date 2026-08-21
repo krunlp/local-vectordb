@@ -348,4 +348,46 @@ assert "ce_c" not in neighbors_after_compact  # stale edge cleaned up
 assert "ce_b" in neighbors_after_compact  # legitimate edge preserved
 print("compact(): edges to dropped (crash-orphaned) records cleaned up correctly")
 
+# 15. Query language (small Cypher-like subset over the graph).
+from vectordb.query import run_query, QueryError
+shutil.rmtree("/tmp/testdb_query", ignore_errors=True)
+db10 = VectorDB("/tmp/testdb_query", dim=4)
+q_docs = {
+    "q_policy": {"type": "Policy", "title": "Revenue Policy"},
+    "q_metric": {"type": "Metric", "title": "Revenue"},
+    "q_calc": {"type": "Computation", "title": "Revenue YTD"},
+}
+for qid, qmeta in q_docs.items():
+    db10.add(qid, np.random.randn(4).astype(np.float32), qmeta)
+db10.add_edge("q_policy", "q_metric", relation="references")
+db10.add_edge("q_metric", "q_calc", relation="references")
+
+r = run_query(db10, "MATCH (a)-[:references]->(b) WHERE a.id = 'q_policy' RETURN b.id, b.title")
+assert r == [{"b.id": "q_metric", "b.title": "Revenue"}]
+
+r2 = run_query(db10, "MATCH (a)-[:references*1..2]->(b) WHERE a.id = 'q_policy' RETURN b.id")
+assert {row["b.id"] for row in r2} == {"q_metric", "q_calc"}
+
+r3 = run_query(db10, "MATCH (a)-[:references*1..2]->(b) WHERE a.id = 'q_policy' AND b.type = 'Computation' RETURN b.id")
+assert r3 == [{"b.id": "q_calc"}]
+
+r4 = run_query(db10, "MATCH (a)-[:references]->(b) WHERE a.type = 'Policy' RETURN a.title, b.title")
+assert r4 == [{"a.title": "Revenue Policy", "b.title": "Revenue"}]  # full-scan start (no a.id constraint)
+
+no_match = run_query(db10, "MATCH (a)-[:references]->(b) WHERE a.id = 'nonexistent' RETURN b")
+assert no_match == []
+
+for bad_query in [
+    "MATCH (a)-[:references]->(b) WHERE a.id = 'x' OR b.id = 'y' RETURN a",
+    "MATCH (a)-[:references]->(b) WHERE c.id = 'x' RETURN a",
+    "WHERE a.id = 'x' RETURN a",
+    "MATCH (a)-[:references]->(b) WHERE a.id = 'x'",
+]:
+    try:
+        run_query(db10, bad_query)
+        raise AssertionError(f"should have raised QueryError: {bad_query!r}")
+    except QueryError:
+        pass
+print("Query language: single-hop, variable-length, filters, full-scan, and error handling all verified")
+
 print("\nALL TESTS PASSED")
