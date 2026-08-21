@@ -408,4 +408,40 @@ assert len(uncapped["rows"]) == 100
 print("Query language: truncation flag correctly propagates from traverse() through run_query")
 print("Query language: single-hop, variable-length, filters, full-scan, and error handling all verified")
 
+# 16. Graph algorithms: PageRank, degree centrality, connected components.
+# Cross-checked against networkx (an independent reference implementation)
+# where available, not just checked for "runs without error."
+from vectordb.graph_algorithms import degree_centrality, connected_components, pagerank
+shutil.rmtree("/tmp/testdb_algo", ignore_errors=True)
+db12 = VectorDB("/tmp/testdb_algo", dim=4)
+for aid in ["algo_a", "algo_b", "algo_c", "algo_hub", "algo_isolated"]:
+    db12.add(aid, np.random.randn(4).astype(np.float32))
+db12.add_edge("algo_a", "algo_hub")
+db12.add_edge("algo_b", "algo_hub")
+db12.add_edge("algo_hub", "algo_c")
+# algo_isolated has no edges at all -- deliberately left out of the graph
+
+comps = connected_components(db12)
+comp_sets = [frozenset(c) for c in comps]
+assert frozenset({"algo_a", "algo_b", "algo_c", "algo_hub"}) in comp_sets
+assert not any("algo_isolated" in c for c in comp_sets)  # correctly excluded, no edges
+
+deg = degree_centrality(db12)
+assert deg["algo_hub"] == 3  # a->hub, b->hub, hub->c
+
+pr = pagerank(db12)
+assert abs(sum(pr.values()) - 1.0) < 1e-4  # rank conservation
+assert pr["algo_hub"] > pr["algo_a"]  # hub receives the most incoming rank
+
+try:
+    import networkx as nx
+    G = nx.DiGraph()
+    G.add_edges_from([("algo_a", "algo_hub"), ("algo_b", "algo_hub"), ("algo_hub", "algo_c")])
+    nx_pr = nx.pagerank(G, alpha=0.85)
+    for node in ["algo_a", "algo_b", "algo_c", "algo_hub"]:
+        assert abs(pr[node] - nx_pr[node]) < 0.01, f"{node}: ours={pr[node]} nx={nx_pr[node]}"
+    print("Graph algorithms: PageRank verified against networkx (independent reference) -- matches")
+except ImportError:
+    print("Graph algorithms: PageRank, degree centrality, connected components verified (networkx not available for cross-check)")
+
 print("\nALL TESTS PASSED")

@@ -311,6 +311,29 @@ def query(req: QueryRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class AlgorithmRequest(BaseModel):
+    relation: Optional[str] = None
+
+
+@app.post("/graph/pagerank")
+def graph_pagerank(req: AlgorithmRequest):
+    from .graph_algorithms import pagerank
+    return pagerank(db, relation=req.relation)
+
+
+@app.post("/graph/degree_centrality")
+def graph_degree_centrality(req: AlgorithmRequest):
+    from .graph_algorithms import degree_centrality
+    return degree_centrality(db, relation=req.relation)
+
+
+@app.post("/graph/connected_components")
+def graph_connected_components(req: AlgorithmRequest):
+    from .graph_algorithms import connected_components
+    components = connected_components(db, relation=req.relation)
+    return {"components": [list(c) for c in components]}
+
+
 @app.get("/count")
 def count():
     return {"count": db.count()}

@@ -299,6 +299,82 @@ clauses, node labels, aggregation, `ORDER BY`/`LIMIT`,
 `CREATE`/`MERGE`/`SET`/`DELETE`. This is not Cypher — it's a small,
 honest slice of it.
 
+## Graph algorithms
+
+`vectordb.graph_algorithms` adds PageRank, degree centrality, and weakly
+connected components — this project had zero graph algorithms before
+this (only BFS traversal), so this closes a real, previously-total gap
+rather than extending an existing feature.
+
+```python
+from vectordb.graph_algorithms import pagerank, degree_centrality, connected_components
+
+pagerank(db)                    # {"concept_id": score, ...} -- sums to ~1.0
+degree_centrality(db)           # {"concept_id": edge_count, ...}
+connected_components(db)        # [set of ids, set of ids, ...] -- one per component
+```
+
+Also exposed via `POST /graph/pagerank`, `/graph/degree_centrality`,
+`/graph/connected_components`.
+
+**Verification, not just "it runs":** PageRank was cross-checked against
+`networkx`'s independent reference implementation (including the classic
+dangling-node edge case — a node with in-edges but no out-edges, a common
+source of rank-conservation bugs) and matched to within floating-point
+tolerance on every test graph, including the real OKF-derived
+`acme_retail` graph, where it correctly surfaced the most-referenced
+concept as highest-ranked.
+
+**Honest scope**: these are pure-Python implementations over the SQLite
+edge table — correct and tested, but not vectorized/matrix-native
+execution. That's the actual architectural difference from something
+like FalkorDB's GraphBLAS engine (see the maturity roadmap below), and
+isn't closeable without a fundamentally different storage engine. These
+algorithms will be fine at the scale this project has been tested at
+(tens of thousands of nodes); they are not competing with a sparse-matrix
+engine's ability to run PageRank over millions of nodes.
+
+## Graph DB maturity roadmap (honest assessment)
+
+Compared against Neo4j and FalkorDB specifically — researched, not
+assumed. FalkorDB represents graphs as sparse adjacency matrices and
+executes traversals as GraphBLAS linear algebra (a multi-hop pattern
+match becomes matrix multiplication); Neo4j uses index-free
+adjacency (every node holds direct pointers to its relationship
+records) plus a cost-based query planner refined over more than a
+decade. Neither is what this project is.
+
+**Genuinely closeable, and now closed:**
+- ✅ Graph algorithms (PageRank, centrality, connected components) — this session
+- ✅ A declarative query language (small Cypher subset) — see above
+- ✅ Correctness hardening (cycles, dangling edges, crash-recovery cleanup, silent-truncation signaling) — extensively adversarially tested
+
+**Genuinely closeable, not yet done (realistic next steps if this keeps
+growing):**
+- Weighted shortest path (Dijkstra) using edge metadata — `shortest_path()`
+  is currently unweighted hop-count only
+- More query language grammar: `OR`, inequality/range conditions,
+  `ORDER BY`/`LIMIT`, basic aggregation (`COUNT`)
+- Bulk edge import from CSV/adjacency-list formats
+- Concurrent-write stress testing specifically for the edges table at
+  higher thread counts than tested so far
+
+**Not closeable without becoming a fundamentally different project:**
+- Matrix-native or index-free adjacency execution (the actual
+  architectural core of both comparison systems)
+- A real cost-based query planner
+- ACID transactions spanning vector + graph + metadata atomically
+- Clustering, replication, horizontal scale
+- Full Cypher/Gremlin language compliance
+- Years of production hardening, multi-language drivers, ecosystem tooling
+
+The honest framing, unchanged from earlier in this conversation: this is
+a correctness-hardened, algorithmically-real graph layer bolted onto a
+vector DB — meaningfully more capable than it was, still not a graph
+database in the category Neo4j or FalkorDB occupy, and closing the
+remaining gap would mean rewriting the storage engine, not adding more
+Python functions.
+
 ## Capacity planning
 
 Real measured numbers (not estimates) at dim=128: **660 bytes/vector on

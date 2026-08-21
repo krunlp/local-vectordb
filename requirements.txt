@@ -2,6 +2,11 @@ hnswlib>=0.8.0
 numpy>=1.24.0
 pyyaml>=6.0.0  # for OKF bundle ingestion (vectordb.okf)
 
+# Optional: only used by the test suite to cross-check PageRank against
+# an independent reference implementation. Not a runtime dependency of
+# vectordb.graph_algorithms itself.
+networkx>=3.0.0
+
 # Optional: HTTP server (vectordb.api)
 fastapi>=0.110.0
 uvicorn>=0.29.0
