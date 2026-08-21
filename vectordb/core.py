@@ -669,6 +669,7 @@ class VectorDB:
                 if missing_ids:
                     self.store.mark_deleted_many(missing_ids)
                     self.store.delete_fts_many(missing_ids)
+                    self.store.delete_edges_for_ids(missing_ids)
 
             if not present:
                 self.save()

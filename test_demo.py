@@ -325,4 +325,27 @@ r = db8.search(np.random.randn(4).astype(np.float32), k=5)
 assert r == []  # must degrade gracefully, not raise
 print("search() robustness: index/metadata count mismatch handled gracefully")
 
+# 14. compact() must clean up edges for records it drops (crash-recovery
+#     orphans), matching delete()'s edge cleanup -- otherwise a
+#     permanently-dropped id leaves a permanently-dangling edge behind.
+shutil.rmtree("/tmp/testdb_compact_edges", ignore_errors=True)
+compact_edge_script = '''
+import numpy as np
+from vectordb import VectorDB
+db = VectorDB("/tmp/testdb_compact_edges", dim=4, max_elements=100)
+db.add(["ce_a", "ce_b"], np.random.randn(2,4).astype(np.float32))
+db.save()
+db.add(["ce_c"], np.random.randn(1,4).astype(np.float32))
+db.add_edge("ce_a", "ce_c", relation="references")  # will be orphaned by the "crash"
+db.add_edge("ce_a", "ce_b", relation="references")  # must survive
+'''
+subprocess.run([sys.executable, "-c", compact_edge_script], check=True)
+db9 = VectorDB("/tmp/testdb_compact_edges")
+compact_result = db9.compact()
+assert compact_result == {"kept": 2, "dropped": 1}
+neighbors_after_compact = db9.get_neighbors("ce_a", direction="out")
+assert "ce_c" not in neighbors_after_compact  # stale edge cleaned up
+assert "ce_b" in neighbors_after_compact  # legitimate edge preserved
+print("compact(): edges to dropped (crash-orphaned) records cleaned up correctly")
+
 print("\nALL TESTS PASSED")
