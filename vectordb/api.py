@@ -223,6 +223,76 @@ def compact():
     return {"ok": True, "count": db.count()}
 
 
+class AddEdgeRequest(BaseModel):
+    source: str
+    target: str
+    relation: str = "related"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GetNeighborsRequest(BaseModel):
+    id: str
+    relation: Optional[str] = None
+    direction: str = "both"
+    with_metadata: bool = False
+
+
+class TraverseRequest(BaseModel):
+    start_id: str
+    max_depth: int = 2
+    relation: Optional[str] = None
+    direction: str = "both"
+
+
+class ShortestPathRequest(BaseModel):
+    source: str
+    target: str
+    relation: Optional[str] = None
+    direction: str = "both"
+
+
+class GraphSearchRequest(BaseModel):
+    vector: List[float]
+    k: int = 10
+    expand_hops: int = 1
+    filter: Optional[Dict[str, Any]] = None
+
+
+@app.post("/add_edge")
+def add_edge(req: AddEdgeRequest):
+    db.add_edge(req.source, req.target, relation=req.relation, metadata=req.metadata)
+    db.save()
+    return {"ok": True}
+
+
+@app.post("/get_neighbors")
+def get_neighbors(req: GetNeighborsRequest):
+    return {"neighbors": db.get_neighbors(
+        req.id, relation=req.relation, direction=req.direction, with_metadata=req.with_metadata
+    )}
+
+
+@app.post("/traverse")
+def traverse(req: TraverseRequest):
+    return db.traverse(
+        req.start_id, max_depth=req.max_depth, relation=req.relation, direction=req.direction
+    )
+
+
+@app.post("/shortest_path")
+def shortest_path(req: ShortestPathRequest):
+    path = db.shortest_path(
+        req.source, req.target, relation=req.relation, direction=req.direction
+    )
+    return {"path": path}
+
+
+@app.post("/graph_search")
+def graph_search(req: GraphSearchRequest):
+    results = db.graph_search(req.vector, k=req.k, expand_hops=req.expand_hops, filter=req.filter)
+    return {"results": results}
+
+
 @app.get("/count")
 def count():
     return {"count": db.count()}

@@ -317,6 +317,7 @@ class VectorDB:
             for label in labels:
                 self.index.mark_deleted(label)
             self.store.delete_fts_many(ids)
+            self.store.delete_edges_for_ids(ids)
 
     def update_metadata(self, id_: str, metadata: Dict[str, Any]):
         """Replace metadata for an existing record without touching its vector."""
@@ -360,11 +361,20 @@ class VectorDB:
                 # acquiring the lock lets concurrent searches with different
                 # ef values race and clobber each other.
             active_count = self.store.count()  # excludes soft-deleted records
-            if active_count == 0:
+            index_count = self.index.get_current_count()
+            # Guard against the metadata store and the HNSW index disagreeing
+            # on how many vectors actually exist -- this happens if the
+            # process crashed/exited between a write and the next save()
+            # (see the persistence-gotcha docs and compact()). Without this,
+            # requesting more results than the index actually holds throws a
+            # cryptic hnswlib error instead of degrading gracefully; run
+            # compact() to repair the underlying inconsistency.
+            effective_count = min(active_count, index_count)
+            if effective_count == 0:
                 return []
             # Over-fetch when filtering, since hnswlib can't filter natively.
             fetch_k = k if filter_fn is None else max(k * 10, 50)
-            fetch_k = min(fetch_k, active_count)
+            fetch_k = min(fetch_k, effective_count)
             labels, distances = self.index.knn_query(query_vector, k=fetch_k)
 
         results = []
@@ -411,11 +421,220 @@ class VectorDB:
     def count(self) -> int:
         return self.store.count()
 
+    def edge_count(self) -> int:
+        return self.store.edge_count()
+
     # -- persistence / maintenance ---------------------------------------------
 
     def save(self):
         with self._lock:
             self.index.save_index(self._index_path)
+
+    # -- graph: edges, traversal, paths --------------------------------------
+
+    def add_edge(
+        self,
+        source_id: str,
+        target_id: str,
+        relation: str = "related",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """Add a directed, typed edge between two ids (upsert -- calling
+        again with the same source/target/relation overwrites metadata).
+        Edges are independent of whether either id has a vector -- you can
+        link ids that don't exist yet, matching how OKF itself tolerates
+        links to concepts that aren't present."""
+        with self._lock:
+            self.store.add_edge(source_id, target_id, relation, metadata or {})
+
+    def add_edges(self, edges: List[Dict[str, Any]]):
+        """Batch add_edge -- one commit for the whole call. Each dict needs
+        'source' and 'target', optionally 'relation' (default 'related')
+        and 'metadata'."""
+        with self._lock:
+            rows = [
+                (e["source"], e["target"], e.get("relation", "related"), e.get("metadata", {}))
+                for e in edges
+            ]
+            self.store.add_edges_many(rows)
+
+    def delete_edge(self, source_id: str, target_id: str, relation: Optional[str] = None):
+        """Delete a specific edge, or all edges between source_id and
+        target_id (any relation) if relation is omitted."""
+        with self._lock:
+            self.store.delete_edge(source_id, target_id, relation)
+
+    def get_neighbors(
+        self,
+        id_: str,
+        relation: Optional[str] = None,
+        direction: str = "both",
+        with_metadata: bool = False,
+    ) -> List[Any]:
+        """
+        Immediate (1-hop) neighbors of id_.
+
+        direction: 'out' (edges where id_ is the source), 'in' (id_ is the
+        target), or 'both' (default).
+        relation: filter to a specific edge type (e.g. "links_to"); None
+        returns neighbors across all relation types.
+
+        Returns a list of neighbor ids, or if with_metadata=True, a list of
+        {"id", "relation", "direction", "edge_metadata", "metadata"} dicts
+        (where "metadata" is the neighbor node's own record metadata, and
+        "edge_metadata" is metadata attached to the edge itself). A
+        neighbor id with no corresponding record (a dangling edge) still
+        appears, with "metadata": None.
+        """
+        with self._lock:
+            edges = self.store.get_edges(id_, relation=relation, direction=direction)
+        results = []
+        seen = set()
+        for source, target, rel, edge_meta in edges:
+            neighbor_id = target if source == id_ else source
+            neighbor_direction = "out" if source == id_ else "in"
+            key = (neighbor_id, rel, neighbor_direction)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not with_metadata:
+                results.append(neighbor_id)
+                continue
+            label = self.store.get_label(neighbor_id)
+            node_meta = None
+            if label is not None:
+                rec = self.store.get_by_label(label)
+                if rec is not None:
+                    node_meta = rec[1]
+            results.append({
+                "id": neighbor_id,
+                "relation": rel,
+                "direction": neighbor_direction,
+                "edge_metadata": edge_meta,
+                "metadata": node_meta,
+            })
+        return results
+
+    def traverse(
+        self,
+        start_id: str,
+        max_depth: int = 2,
+        relation: Optional[str] = None,
+        direction: str = "both",
+        max_nodes: int = 1000,
+    ) -> Dict[str, Any]:
+        """
+        Breadth-first traversal from start_id out to max_depth hops.
+        Returns {"nodes": {id: depth, ...}, "edges": [(source, target, relation), ...]}
+        covering every node/edge visited. Stops early (may be incomplete)
+        if max_nodes is reached, to bound cost on a densely connected graph.
+        """
+        with self._lock:
+            visited = {start_id: 0}
+            frontier = [start_id]
+            edges_seen = []
+            depth = 0
+            while frontier and depth < max_depth and len(visited) < max_nodes:
+                next_frontier = []
+                for node in frontier:
+                    for source, target, rel, _meta in self.store.get_edges(
+                        node, relation=relation, direction=direction
+                    ):
+                        neighbor = target if source == node else source
+                        edges_seen.append((source, target, rel))
+                        if neighbor not in visited:
+                            visited[neighbor] = depth + 1
+                            next_frontier.append(neighbor)
+                            if len(visited) >= max_nodes:
+                                break
+                    if len(visited) >= max_nodes:
+                        break
+                frontier = next_frontier
+                depth += 1
+            # dedup edges (the same edge can be re-discovered from either endpoint)
+            unique_edges = sorted(set(edges_seen))
+            return {"nodes": visited, "edges": unique_edges}
+
+    def shortest_path(
+        self, source_id: str, target_id: str, relation: Optional[str] = None,
+        direction: str = "both", max_depth: int = 10,
+    ) -> Optional[List[str]]:
+        """BFS shortest path (by hop count, not edge weight) from source_id
+        to target_id. Returns the list of ids along the path (inclusive of
+        both endpoints), or None if unreachable within max_depth hops."""
+        if source_id == target_id:
+            return [source_id]
+        with self._lock:
+            visited = {source_id}
+            parent: Dict[str, str] = {}
+            frontier = [source_id]
+            depth = 0
+            while frontier and depth < max_depth:
+                next_frontier = []
+                for node in frontier:
+                    for source, target, _rel, _meta in self.store.get_edges(
+                        node, relation=relation, direction=direction
+                    ):
+                        neighbor = target if source == node else source
+                        if neighbor in visited:
+                            continue
+                        visited.add(neighbor)
+                        parent[neighbor] = node
+                        if neighbor == target_id:
+                            path = [neighbor]
+                            while path[-1] != source_id:
+                                path.append(parent[path[-1]])
+                            return list(reversed(path))
+                        next_frontier.append(neighbor)
+                frontier = next_frontier
+                depth += 1
+            return None
+
+    def graph_search(
+        self,
+        query_vector: Union[np.ndarray, Sequence[float]],
+        k: int = 10,
+        expand_hops: int = 1,
+        relation: Optional[str] = None,
+        filter: Optional[Union[FilterFn, Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Vector search, then expand each hit outward through the graph by
+        expand_hops and include those connected nodes too -- useful for
+        "find similar things, AND whatever they're linked to" (e.g. find
+        the most relevant OKF concepts, then pull in their direct
+        references even if those references alone wouldn't have ranked in
+        the top-k by vector similarity).
+
+        Returns entries like search()'s, plus "via" ("vector" for a direct
+        hit, or "graph" for a node pulled in through expansion) and
+        "hop_distance" (0 for direct hits).
+        """
+        direct_hits = self.search(query_vector, k=k, filter=filter)
+        results = {r["id"]: {**r, "via": "vector", "hop_distance": 0} for r in direct_hits}
+
+        if expand_hops > 0:
+            for hit in direct_hits:
+                expansion = self.traverse(hit["id"], max_depth=expand_hops)
+                for node_id, depth in expansion["nodes"].items():
+                    if node_id in results or depth == 0:
+                        continue
+                    label = self.store.get_label(node_id)
+                    if label is None:
+                        continue  # dangling edge target with no actual record
+                    rec = self.store.get_by_label(label)
+                    if rec is None:
+                        continue
+                    _, meta = rec
+                    if filter is not None:
+                        filter_fn = self._compile_filter(filter)
+                        if filter_fn is not None and not filter_fn(meta):
+                            continue
+                    results[node_id] = {
+                        "id": node_id, "score": None, "metadata": meta,
+                        "via": "graph", "hop_distance": depth,
+                    }
+        return list(results.values())
 
     def compact(self) -> Dict[str, int]:
         """

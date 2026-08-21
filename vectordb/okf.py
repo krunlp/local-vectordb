@@ -207,11 +207,27 @@ def load_bundle(bundle_root: str) -> List[OKFConcept]:
     return concepts
 
 
+def _normalize_link_target(link: str, concept_dir: str) -> str:
+    """Turn a raw markdown link target from within a concept's body into a
+    bundle-relative concept_id (SPEC §6.1 -- links are either absolute,
+    '/tables/x.md', or relative, './x.md' / '../y.md'), matching how
+    concept_id is derived elsewhere (path with .md stripped)."""
+    if link.startswith("/"):
+        rel = link[1:]
+    else:
+        rel = os.path.normpath(os.path.join(concept_dir, link))
+    rel = rel.replace(os.sep, "/")
+    if rel.endswith(".md"):
+        rel = rel[:-3]
+    return rel
+
+
 def ingest_okf_bundle(
     db,
     bundle_root: str,
     include_deprecated: bool = False,
     batch_size: int = 500,
+    add_graph_edges: bool = True,
 ) -> Dict[str, int]:
     """
     Load an OKF bundle into a VectorDB via add_text() -- requires db to have
@@ -223,7 +239,18 @@ def ingest_okf_bundle(
       since surfacing deprecated info in search results is usually wrong.
       Set True to index them anyway (e.g. for an archival/audit use case).
 
-    Returns {"indexed": N, "skipped_deprecated": N, "skipped_malformed": N}.
+    add_graph_edges: OKF concepts cross-reference each other via ordinary
+      markdown links (SPEC §6.1), already extracted into each concept's
+      `links` (see OKFConcept). When True (default), those links are added
+      as real graph edges (relation="references") so you can
+      get_neighbors()/traverse()/shortest_path() over the bundle's actual
+      reference structure, not just search it. Only edges FROM an indexed
+      (non-deprecated, well-formed) concept are added; the edge's target
+      may still be a dangling id if that concept wasn't indexed or doesn't
+      exist -- get_neighbors() handles that gracefully.
+
+    Returns {"indexed": N, "skipped_deprecated": N, "skipped_malformed": N,
+    "edges_added": N}.
     """
     if db.embedder is None:
         raise RuntimeError(
@@ -242,6 +269,7 @@ def ingest_okf_bundle(
     indexed = 0
     skipped_deprecated = 0
     skipped_malformed = 0
+    edges_to_add: List[Dict[str, Any]] = []
 
     batch_ids, batch_texts, batch_metas = [], [], []
 
@@ -266,12 +294,26 @@ def ingest_okf_bundle(
         batch_metas.append(concept.metadata())
         indexed += 1
 
+        if add_graph_edges and concept.links:
+            concept_dir = os.path.dirname(concept.path)
+            for link in concept.links:
+                target_id = _normalize_link_target(link, concept_dir)
+                edges_to_add.append({
+                    "source": concept.concept_id,
+                    "target": target_id,
+                    "relation": "references",
+                })
+
         if len(batch_ids) >= batch_size:
             flush()
 
     flush()
+    if edges_to_add:
+        db.add_edges(edges_to_add)
+
     return {
         "indexed": indexed,
         "skipped_deprecated": skipped_deprecated,
         "skipped_malformed": skipped_malformed,
+        "edges_added": len(edges_to_add),
     }

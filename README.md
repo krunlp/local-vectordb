@@ -197,6 +197,54 @@ Notes:
   paper) and `candidate_pool` (how many results each individual search
   contributes before fusion; larger = better recall, more per-query cost).
 
+## Graph functionality
+
+Beyond vector similarity, you can attach explicit, typed, directed edges
+between records and query the resulting graph — neighbors, multi-hop
+traversal, shortest path, and a combined vector-plus-graph search.
+
+```python
+db.add_edge("doc1", "doc2", relation="references")
+db.add_edge("doc2", "doc3", relation="references")
+
+db.get_neighbors("doc1", direction="out")          # ['doc2']
+db.get_neighbors("doc1", with_metadata=True)        # full neighbor records + edge metadata
+
+db.traverse("doc1", max_depth=2)
+# {"nodes": {"doc1": 0, "doc2": 1, "doc3": 2}, "edges": [("doc1","doc2","references"), ...]}
+
+db.shortest_path("doc1", "doc3")                    # ['doc1', 'doc2', 'doc3'] or None
+
+# vector search, then pull in graph-connected nodes too (even ones that
+# wouldn't rank in the top-k by similarity alone)
+db.graph_search(query_vector, k=5, expand_hops=1)
+```
+
+Also exposed over the API: `POST /add_edge`, `/get_neighbors`, `/traverse`,
+`/shortest_path`, `/graph_search`.
+
+Notes:
+- Edges are independent of the vector index — you can link ids that don't
+  (yet) have a vector. `get_neighbors()`/`traverse()` return such
+  "dangling" neighbors with `metadata: None` rather than erroring, since
+  real-world link graphs (including OKF's own) routinely reference things
+  that aren't (yet) present.
+- `direction`: `'out'` (edges where the given id is the source), `'in'`,
+  or `'both'` (default) on every graph method.
+- `traverse()`/`shortest_path()` are unweighted BFS (hop count, not edge
+  weight) — fine for "how are these connected" questions, not meant for
+  weighted-shortest-path use cases.
+- Deleting a record (`db.delete()`) also removes every edge touching it,
+  so the graph doesn't accumulate edges pointing at nothing.
+- **OKF integration**: `ingest_okf_bundle()` automatically turns each
+  concept's markdown cross-links (already extracted per SPEC §6.1) into
+  real graph edges (`relation="references"`), so an ingested OKF bundle is
+  immediately traversable, not just searchable. Verified against Google's
+  real `acme_retail` bundle — 14 real cross-references correctly became
+  queryable edges, including a correctly-dangling edge to a concept that
+  exists in the bundle's link graph but was excluded from search because
+  it's marked `deprecated`.
+
 ## Capacity planning
 
 Real measured numbers (not estimates) at dim=128: **660 bytes/vector on

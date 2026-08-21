@@ -65,6 +65,19 @@ class MetadataStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS edges (
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                relation TEXT NOT NULL DEFAULT 'related',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY (source_id, target_id, relation)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id)")
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT
@@ -212,6 +225,82 @@ class MetadataStore:
         except sqlite3.OperationalError:
             # Malformed query somehow slipped through quoting — fail soft.
             return []
+
+    # -- graph edges ---------------------------------------------------------
+    # Edges reference ids by string, independent of vector labels -- this
+    # deliberately allows "dangling" edges to ids that don't (yet) exist as
+    # vectors (e.g. an OKF concept linking to one not yet ingested), matching
+    # OKF's own tolerance for broken links rather than enforcing referential
+    # integrity that would reject perfectly normal real-world graphs.
+
+    def add_edge(self, source_id: str, target_id: str, relation: str, metadata: Dict[str, Any]):
+        self.add_edges_many([(source_id, target_id, relation, metadata)])
+
+    def add_edges_many(self, edges: List[Tuple[str, str, str, Dict[str, Any]]]):
+        if not edges:
+            return
+        rows = [(s, t, r, json.dumps(m)) for s, t, r, m in edges]
+        self.conn.executemany(
+            """
+            INSERT INTO edges (source_id, target_id, relation, metadata)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
+                metadata=excluded.metadata
+            """,
+            rows,
+        )
+        self.conn.commit()
+
+    def delete_edge(self, source_id: str, target_id: str, relation: Optional[str] = None):
+        if relation is not None:
+            self.conn.execute(
+                "DELETE FROM edges WHERE source_id=? AND target_id=? AND relation=?",
+                (source_id, target_id, relation),
+            )
+        else:
+            self.conn.execute(
+                "DELETE FROM edges WHERE source_id=? AND target_id=?", (source_id, target_id)
+            )
+        self.conn.commit()
+
+    def delete_edges_for_ids(self, ids: List[str]):
+        """Remove all edges touching any of the given ids (source or
+        target) -- called when those ids are deleted from the DB, so the
+        graph doesn't accumulate edges pointing at nothing."""
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        self.conn.execute(
+            f"DELETE FROM edges WHERE source_id IN ({placeholders}) "
+            f"OR target_id IN ({placeholders})",
+            ids + ids,
+        )
+        self.conn.commit()
+
+    def get_edges(
+        self, id_: str, relation: Optional[str] = None, direction: str = "both"
+    ) -> List[Tuple[str, str, str, Dict[str, Any]]]:
+        """Returns (source_id, target_id, relation, metadata) tuples touching
+        id_. direction: 'out' (id_ is source), 'in' (id_ is target), or
+        'both'."""
+        clauses, params = [], []
+        if direction in ("out", "both"):
+            clauses.append("source_id = ?")
+            params.append(id_)
+        if direction in ("in", "both"):
+            clauses.append("target_id = ?")
+            params.append(id_)
+        where = " OR ".join(clauses)
+        query = f"SELECT source_id, target_id, relation, metadata FROM edges WHERE ({where})"
+        if relation is not None:
+            query += " AND relation = ?"
+            params.append(relation)
+        cur = self.conn.execute(query, params)
+        return [(r[0], r[1], r[2], json.loads(r[3])) for r in cur.fetchall()]
+
+    def edge_count(self) -> int:
+        cur = self.conn.execute("SELECT COUNT(*) FROM edges")
+        return cur.fetchone()[0]
 
     # -- misc key/value config store ----------------------------------------
 

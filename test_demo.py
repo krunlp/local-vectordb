@@ -167,7 +167,7 @@ shutil.rmtree("/tmp/testdb_okf_ingest", ignore_errors=True)
 db6 = VectorDB("/tmp/testdb_okf_ingest", embedder=MockEmbedder())
 result = ingest_okf_bundle(db6, "/tmp/testdb_okf_bundle")
 print("OKF ingest result:", result)
-assert result == {"indexed": 2, "skipped_deprecated": 1, "skipped_malformed": 0}
+assert result == {"indexed": 2, "skipped_deprecated": 1, "skipped_malformed": 0, "edges_added": 1}
 assert db6.get("tables/legacy_orders") is None  # deprecated, correctly skipped
 orders = db6.get("tables/orders")
 assert orders["metadata"]["stale_after"] == "2026-12-31"  # date -> string, JSON-safe
@@ -263,5 +263,66 @@ recursion_concepts = load_bundle("/tmp/testdb_okf_recursion")
 assert len(recursion_concepts) == 1
 assert recursion_concepts[0].concept_id == "sibling"
 print("OKF loading: pathological YAML depth skipped without crashing sibling concepts")
+
+# 12. Graph functionality: edges, neighbors, traversal, shortest path,
+#     graph_search, and edge cleanup on delete.
+shutil.rmtree("/tmp/testdb_graph", ignore_errors=True)
+db7 = VectorDB("/tmp/testdb_graph", dim=4)
+graph_vecs = {}
+for gid in ["g_a", "g_b", "g_c", "g_d", "g_e"]:
+    v = np.random.randn(4).astype(np.float32)
+    graph_vecs[gid] = v
+    db7.add(gid, v, {"name": gid})
+db7.add_edge("g_a", "g_b", relation="links_to")
+db7.add_edge("g_b", "g_c", relation="links_to")
+db7.add_edge("g_c", "g_d", relation="links_to")
+db7.add_edge("g_a", "g_e", relation="mentions")
+db7.save()
+
+assert db7.edge_count() == 4
+assert set(db7.get_neighbors("g_a", direction="out")) == {"g_b", "g_e"}
+assert db7.get_neighbors("g_a", relation="links_to") == ["g_b"]
+
+path = db7.shortest_path("g_a", "g_d")
+assert path == ["g_a", "g_b", "g_c", "g_d"]
+
+trav = db7.traverse("g_a", max_depth=3)
+assert trav["nodes"]["g_d"] == 3
+assert trav["nodes"]["g_e"] == 1
+
+# dangling edge: target has no record, must not crash, metadata is None
+db7.add_edge("g_a", "nonexistent", relation="mentions")
+dangling = [n for n in db7.get_neighbors("g_a", direction="out", with_metadata=True) if n["id"] == "nonexistent"]
+assert len(dangling) == 1 and dangling[0]["metadata"] is None
+
+# graph_search: vector hit + graph-expanded connected nodes
+gs = db7.graph_search(graph_vecs["g_a"], k=1, expand_hops=2)
+gs_ids = {r["id"] for r in gs}
+assert "g_a" in gs_ids and "g_b" in gs_ids and "g_c" in gs_ids
+assert [r for r in gs if r["id"] == "g_a"][0]["via"] == "vector"
+assert [r for r in gs if r["id"] == "g_b"][0]["via"] == "graph"
+
+# delete must clean up edges touching the deleted id
+db7.delete("g_c")
+assert "g_c" not in db7.get_neighbors("g_b", direction="out")
+print("Graph: edges, neighbors, traversal, shortest_path, graph_search, delete-cleanup all verified")
+
+# 13. Regression: search() must degrade gracefully (not crash with a
+#     cryptic hnswlib error) when the metadata store and HNSW index
+#     disagree on count -- e.g. from the same unsaved-write scenario
+#     tested in #5, exercised through search() specifically this time.
+shutil.rmtree("/tmp/testdb_search_mismatch", ignore_errors=True)
+mismatch_script = '''
+import numpy as np
+from vectordb import VectorDB
+db = VectorDB("/tmp/testdb_search_mismatch", dim=4, max_elements=100)
+db.add(["m0"], np.random.randn(1,4).astype(np.float32))
+# exits without saving
+'''
+subprocess.run([sys.executable, "-c", mismatch_script], check=True)
+db8 = VectorDB("/tmp/testdb_search_mismatch")  # metadata says count=1, index has 0
+r = db8.search(np.random.randn(4).astype(np.float32), k=5)
+assert r == []  # must degrade gracefully, not raise
+print("search() robustness: index/metadata count mismatch handled gracefully")
 
 print("\nALL TESTS PASSED")
